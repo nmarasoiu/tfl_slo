@@ -19,6 +19,8 @@ import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -67,6 +69,16 @@ public class TflApiClient implements TflClient {
                 executeWithCircuitBreaker(() -> doFetchAllLines()));
     }
 
+    /**
+     * Fetch status for a specific line with date range (async, non-blocking).
+     * Used for future/planned disruptions - bypasses cache, goes direct to TfL.
+     */
+    @Override
+    public CompletionStage<TubeStatus> fetchLineStatusAsync(String lineId, LocalDate from, LocalDate to) {
+        return retryPolicy.executeAsync(() ->
+                executeWithCircuitBreaker(() -> doFetchLineStatus(lineId, from, to)));
+    }
+
     // Circuit breaker wrapper
     private CompletableFuture<TubeStatus> executeWithCircuitBreaker(
             java.util.function.Supplier<CompletionStage<TubeStatus>> operation) {
@@ -92,6 +104,15 @@ public class TflApiClient implements TflClient {
 
     private CompletionStage<TubeStatus> doFetchAllLines() {
         String url = baseUrl + "/Line/Mode/tube/Status";
+        return fetchAndParse(url, new TypeReference<List<TflLineResponse>>() {})
+                .thenApply(this::toTubeStatus);
+    }
+
+    private CompletionStage<TubeStatus> doFetchLineStatus(String lineId, LocalDate from, LocalDate to) {
+        String url = String.format("%s/Line/%s/Status/%s/to/%s",
+                baseUrl, lineId,
+                from.format(DateTimeFormatter.ISO_LOCAL_DATE),
+                to.format(DateTimeFormatter.ISO_LOCAL_DATE));
         return fetchAndParse(url, new TypeReference<List<TflLineResponse>>() {})
                 .thenApply(this::toTubeStatus);
     }

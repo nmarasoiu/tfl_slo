@@ -42,6 +42,7 @@ dependencies {
     // Testing
     testImplementation("org.apache.pekko:pekko-actor-testkit-typed_2.13:$pekkoVersion")
     testImplementation("org.apache.pekko:pekko-multi-node-testkit_2.13:$pekkoVersion")
+    testImplementation("org.apache.pekko:pekko-http-testkit_2.13:$pekkoHttpVersion")
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
     testImplementation("org.assertj:assertj-core:3.25.3")
     testImplementation("org.mockito:mockito-core:5.11.0")

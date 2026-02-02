@@ -2,6 +2,7 @@ package com.ig.tfl.api;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import com.ig.tfl.client.TflClient;
 import com.ig.tfl.crdt.TubeStatusReplicator;
 import com.ig.tfl.crdt.TubeStatusReplicator.GetStatus;
 import com.ig.tfl.crdt.TubeStatusReplicator.StatusResponse;
@@ -16,12 +17,16 @@ import org.apache.pekko.http.javadsl.model.StatusCodes;
 import org.apache.pekko.http.javadsl.model.headers.RawHeader;
 import org.apache.pekko.http.javadsl.server.AllDirectives;
 import org.apache.pekko.http.javadsl.server.ExceptionHandler;
+import org.apache.pekko.http.javadsl.server.PathMatchers;
 import org.apache.pekko.http.javadsl.server.RejectionHandler;
 import org.apache.pekko.http.javadsl.server.Route;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.Map;
 import java.util.concurrent.CompletionStage;
 import java.util.function.Supplier;
@@ -36,6 +41,7 @@ public class TubeStatusRoutes extends AllDirectives {
 
     private final ActorSystem<?> system;
     private final ActorRef<TubeStatusReplicator.Command> replicator;
+    private final TflClient tflClient;
     private final RateLimiter rateLimiter;
     private final ObjectMapper objectMapper;
     private final Supplier<CircuitBreaker.State> circuitStateSupplier;
@@ -44,9 +50,11 @@ public class TubeStatusRoutes extends AllDirectives {
     public TubeStatusRoutes(
             ActorSystem<?> system,
             ActorRef<TubeStatusReplicator.Command> replicator,
+            TflClient tflClient,
             Supplier<CircuitBreaker.State> circuitStateSupplier) {
         this.system = system;
         this.replicator = replicator;
+        this.tflClient = tflClient;
         this.circuitStateSupplier = circuitStateSupplier;
         this.rateLimiter = RateLimiter.perMinute(100);
         this.objectMapper = new ObjectMapper()
@@ -84,6 +92,21 @@ public class TubeStatusRoutes extends AllDirectives {
                                 // GET /api/v1/tube/disruptions - filter from CRDT
                                 path("disruptions", () ->
                                         get(this::getDisruptions)
+                                ),
+                                // GET /api/v1/tube/{lineId}/status - single line (from CRDT cache)
+                                pathPrefix(PathMatchers.segment(), lineId ->
+                                        concat(
+                                                // GET /api/v1/tube/{lineId}/status
+                                                path("status", () ->
+                                                        get(() -> getLineStatus(lineId))
+                                                ),
+                                                // GET /api/v1/tube/{lineId}/status/{from}/to/{to}
+                                                pathPrefix("status", () ->
+                                                        path(PathMatchers.segment().slash("to").slash(PathMatchers.segment()), (from, to) ->
+                                                                get(() -> getLineStatusWithDateRange(lineId, from, to))
+                                                        )
+                                                )
+                                        )
                                 )
                         )
                 )
@@ -155,6 +178,73 @@ public class TubeStatusRoutes extends AllDirectives {
                     response.status().queriedBy());
             return complete(StatusCodes.OK,
                     toApiResponse(filtered),
+                    Jackson.marshaller(objectMapper));
+        });
+    }
+
+    private Route getLineStatus(String lineId) {
+        CompletionStage<StatusResponse> future = AskPattern.ask(
+                replicator,
+                GetStatus::new,
+                askTimeout,
+                system.scheduler());
+
+        return onSuccess(future, response -> {
+            if (response.status() == null) {
+                return complete(StatusCodes.SERVICE_UNAVAILABLE,
+                        Map.of("error", "No data available"),
+                        Jackson.marshaller(objectMapper));
+            }
+            // Filter to the requested line
+            var lineStatus = response.status().lines().stream()
+                    .filter(line -> line.id().equalsIgnoreCase(lineId))
+                    .findFirst();
+
+            if (lineStatus.isEmpty()) {
+                return complete(StatusCodes.NOT_FOUND,
+                        Map.of("error", "Line not found: " + lineId),
+                        Jackson.marshaller(objectMapper));
+            }
+
+            var filtered = new TubeStatus(
+                    java.util.List.of(lineStatus.get()),
+                    response.status().queriedAt(),
+                    response.status().queriedBy());
+            return complete(StatusCodes.OK,
+                    toApiResponse(filtered),
+                    Jackson.marshaller(objectMapper));
+        });
+    }
+
+    private Route getLineStatusWithDateRange(String lineId, String fromStr, String toStr) {
+        // Parse dates
+        LocalDate from, to;
+        try {
+            from = LocalDate.parse(fromStr, DateTimeFormatter.ISO_LOCAL_DATE);
+            to = LocalDate.parse(toStr, DateTimeFormatter.ISO_LOCAL_DATE);
+        } catch (DateTimeParseException e) {
+            return complete(StatusCodes.BAD_REQUEST,
+                    Map.of("error", "Invalid date format. Use YYYY-MM-DD"),
+                    Jackson.marshaller(objectMapper));
+        }
+
+        if (from.isAfter(to)) {
+            return complete(StatusCodes.BAD_REQUEST,
+                    Map.of("error", "Start date must be before or equal to end date"),
+                    Jackson.marshaller(objectMapper));
+        }
+
+        // Date range queries go direct to TfL (can't cache future data)
+        CompletionStage<TubeStatus> future = tflClient.fetchLineStatusAsync(lineId, from, to);
+
+        return onSuccess(future, status -> {
+            if (status == null || status.lines().isEmpty()) {
+                return complete(StatusCodes.NOT_FOUND,
+                        Map.of("error", "No status found for line: " + lineId),
+                        Jackson.marshaller(objectMapper));
+            }
+            return complete(StatusCodes.OK,
+                    toApiResponse(status),
                     Jackson.marshaller(objectMapper));
         });
     }

@@ -97,7 +97,7 @@ public class TflApplication {
         }
 
         private void startHttpServer(ActorSystem<?> system) {
-            TubeStatusRoutes routes = new TubeStatusRoutes(system, replicator, tflClient::getCircuitState);
+            TubeStatusRoutes routes = new TubeStatusRoutes(system, replicator, tflClient, tflClient::getCircuitState);
 
             CompletionStage<ServerBinding> binding = Http.get(system)
                     .newServerAt("0.0.0.0", httpPort)
