@@ -105,6 +105,22 @@ Client Request
 - LWW (Last-Writer-Wins): freshest timestamp wins
 - No leader election needed
 
+**Replication strategy (AP with aggressive best-effort):**
+```
+TfL fetch completes
+        │
+        ├──► currentStatus = fresh  (immediate, serves HTTP)
+        │
+        └──► WriteMajority(2s)      (async, best-effort)
+                    │
+                    ├── success: majority have data in ~200ms
+                    └── timeout: gossip propagates eventually
+```
+- HTTP responses never wait for replication
+- WriteMajority is optimization, not requirement
+- Gossip interval: 200ms (fast convergence)
+- Delta-CRDT enabled (efficient wire format)
+
 ---
 
 ## Query Tiers

@@ -175,15 +175,18 @@ public class TubeStatusReplicator extends AbstractBehavior<TubeStatusReplicator.
         TubeStatus freshStatus = msg.status();
         log.info("Got fresh data from TfL, {} lines, updating CRDT", freshStatus.lines().size());
 
-        // Update local cache
+        // Update local cache IMMEDIATELY - HTTP responses don't wait for CRDT
         currentStatus = freshStatus;
 
-        // Write to CRDT (will propagate to peers)
+        // Write to CRDT with WriteMajority for aggressive replication
+        // This is async - we don't block, but majority of nodes will have data
+        // within ~200ms (gossip interval). Falls back to eventual consistency
+        // if majority unreachable (partition).
         replicatorAdapter.askUpdate(
                 askReplyTo -> new Replicator.Update<>(
                         STATUS_KEY,
                         LWWRegister.create(selfCluster.selfUniqueAddress(), freshStatus),
-                        Replicator.writeLocal(),
+                        new Replicator.WriteMajority(Duration.ofSeconds(2)),
                         askReplyTo,
                         register -> register.withValue(
                                 selfCluster.selfUniqueAddress(),
@@ -194,10 +197,15 @@ public class TubeStatusReplicator extends AbstractBehavior<TubeStatusReplicator.
     }
 
     private Behavior<Command> onInternalUpdateResponse(InternalUpdateResponse msg) {
+        // AP system: WriteMajority is best-effort optimization, not a requirement.
+        // Data is already in local cache and will spread via gossip eventually.
         if (msg.response() instanceof Replicator.UpdateSuccess<?>) {
-            log.debug("CRDT update successful");
+            log.debug("CRDT write replicated to majority");
+        } else if (msg.response() instanceof Replicator.UpdateTimeout<?>) {
+            log.debug("CRDT write to majority timed out - gossip will propagate eventually");
         } else {
-            log.warn("CRDT update failed: {}", msg.response());
+            log.debug("CRDT write result: {} - local cache serving, gossip will propagate",
+                    msg.response().getClass().getSimpleName());
         }
         return this;
     }
