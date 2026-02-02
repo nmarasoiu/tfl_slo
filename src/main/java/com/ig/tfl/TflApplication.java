@@ -68,8 +68,8 @@ public class TflApplication {
             this.nodeId = nodeId;
             this.httpPort = httpPort;
 
-            // Create TfL client
-            this.tflClient = new TflApiClient(nodeId);
+            // Create TfL client (needs ActorSystem for Pekko HTTP)
+            this.tflClient = new TflApiClient(context.getSystem(), nodeId);
 
             // Create CRDT replicator actor
             this.replicator = context.spawn(

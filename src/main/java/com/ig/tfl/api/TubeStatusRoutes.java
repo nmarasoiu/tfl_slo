@@ -150,38 +150,26 @@ public class TubeStatusRoutes extends AllDirectives {
     }
 
     private Route getLineStatus(String lineId) {
-        try {
-            TubeStatus status = tflClient.fetchLine(lineId);
-            return complete(StatusCodes.OK,
-                    toApiResponse(status),
-                    Jackson.marshaller(objectMapper));
-        } catch (Exception e) {
-            return handleTflError(e);
-        }
+        return onSuccess(tflClient.fetchLineAsync(lineId), status ->
+                complete(StatusCodes.OK,
+                        toApiResponse(status),
+                        Jackson.marshaller(objectMapper)));
     }
 
     private Route getLineStatusWithRange(String lineId, String from, String to) {
-        try {
-            LocalDate fromDate = LocalDate.parse(from, DateTimeFormatter.ISO_LOCAL_DATE);
-            LocalDate toDate = LocalDate.parse(to, DateTimeFormatter.ISO_LOCAL_DATE);
-            TubeStatus status = tflClient.fetchLineWithDateRange(lineId, fromDate, toDate);
-            return complete(StatusCodes.OK,
-                    toApiResponse(status),
-                    Jackson.marshaller(objectMapper));
-        } catch (Exception e) {
-            return handleTflError(e);
-        }
+        LocalDate fromDate = LocalDate.parse(from, DateTimeFormatter.ISO_LOCAL_DATE);
+        LocalDate toDate = LocalDate.parse(to, DateTimeFormatter.ISO_LOCAL_DATE);
+        return onSuccess(tflClient.fetchLineWithDateRangeAsync(lineId, fromDate, toDate), status ->
+                complete(StatusCodes.OK,
+                        toApiResponse(status),
+                        Jackson.marshaller(objectMapper)));
     }
 
     private Route getUnplannedDisruptions() {
-        try {
-            TubeStatus status = tflClient.fetchUnplannedDisruptions();
-            return complete(StatusCodes.OK,
-                    toApiResponse(status),
-                    Jackson.marshaller(objectMapper));
-        } catch (Exception e) {
-            return handleTflError(e);
-        }
+        return onSuccess(tflClient.fetchUnplannedDisruptionsAsync(), status ->
+                complete(StatusCodes.OK,
+                        toApiResponse(status),
+                        Jackson.marshaller(objectMapper)));
     }
 
     private Route handleTflError(Exception e) {

@@ -8,24 +8,27 @@ import com.ig.tfl.model.TubeStatus.LineStatus;
 import com.ig.tfl.model.TubeStatus.TflLineResponse;
 import com.ig.tfl.resilience.CircuitBreaker;
 import com.ig.tfl.resilience.RetryPolicy;
+import org.apache.pekko.actor.typed.ActorSystem;
+import org.apache.pekko.http.javadsl.Http;
+import org.apache.pekko.http.javadsl.model.HttpRequest;
+import org.apache.pekko.http.javadsl.model.HttpResponse;
+import org.apache.pekko.http.javadsl.model.StatusCodes;
+import org.apache.pekko.stream.Materializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 
 import static com.ig.tfl.resilience.RetryPolicy.HttpStatusException;
 
 /**
- * Client for TfL API with resilience patterns.
+ * Client for TfL API using Pekko HTTP (non-blocking).
  */
 public class TflApiClient {
     private static final Logger log = LoggerFactory.getLogger(TflApiClient.class);
@@ -33,17 +36,19 @@ public class TflApiClient {
     private static final String TFL_BASE_URL = "https://api.tfl.gov.uk";
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(10);
 
-    private final HttpClient httpClient;
+    private final ActorSystem<?> system;
+    private final Http http;
+    private final Materializer materializer;
     private final ObjectMapper objectMapper;
     private final CircuitBreaker circuitBreaker;
     private final RetryPolicy retryPolicy;
     private final String nodeId;
 
-    public TflApiClient(String nodeId) {
+    public TflApiClient(ActorSystem<?> system, String nodeId) {
+        this.system = system;
         this.nodeId = nodeId;
-        this.httpClient = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(5))
-                .build();
+        this.http = Http.get(system);
+        this.materializer = Materializer.createMaterializer(system);
         this.objectMapper = new ObjectMapper()
                 .registerModule(new JavaTimeModule());
         this.circuitBreaker = CircuitBreaker.withDefaults("tfl-api");
@@ -51,110 +56,135 @@ public class TflApiClient {
     }
 
     /**
-     * Fetch all tube line statuses.
+     * Fetch all tube line statuses (async, non-blocking).
      */
-    public TubeStatus fetchAllLines() {
-        return retryPolicy.execute(() ->
-                circuitBreaker.execute(() -> doFetchAllLines()));
-    }
-
-    /**
-     * Fetch all tube line statuses (async).
-     */
-    public CompletableFuture<TubeStatus> fetchAllLinesAsync() {
+    public CompletionStage<TubeStatus> fetchAllLinesAsync() {
         return retryPolicy.executeAsync(() ->
-                CompletableFuture.supplyAsync(() ->
-                        circuitBreaker.execute(this::doFetchAllLines)));
+                executeWithCircuitBreaker(() -> doFetchAllLines()));
     }
 
     /**
-     * Fetch status for a specific line.
+     * Fetch status for a specific line (async).
      */
-    public TubeStatus fetchLine(String lineId) {
-        return retryPolicy.execute(() ->
-                circuitBreaker.execute(() -> doFetchLine(lineId)));
+    public CompletionStage<TubeStatus> fetchLineAsync(String lineId) {
+        return retryPolicy.executeAsync(() ->
+                executeWithCircuitBreaker(() -> doFetchLine(lineId)));
     }
 
     /**
-     * Fetch status for a specific line with date range.
+     * Fetch status for a specific line with date range (async).
      */
-    public TubeStatus fetchLineWithDateRange(String lineId, LocalDate startDate, LocalDate endDate) {
-        return retryPolicy.execute(() ->
-                circuitBreaker.execute(() -> doFetchLineWithDateRange(lineId, startDate, endDate)));
+    public CompletionStage<TubeStatus> fetchLineWithDateRangeAsync(
+            String lineId, LocalDate startDate, LocalDate endDate) {
+        return retryPolicy.executeAsync(() ->
+                executeWithCircuitBreaker(() -> doFetchLineWithDateRange(lineId, startDate, endDate)));
     }
 
     /**
-     * Fetch all lines with unplanned disruptions.
+     * Fetch all lines with unplanned disruptions (async).
      */
-    public TubeStatus fetchUnplannedDisruptions() {
-        TubeStatus all = fetchAllLines();
-        List<LineStatus> disrupted = all.lines().stream()
-                .filter(line -> hasUnplannedDisruption(line))
-                .toList();
-        return new TubeStatus(disrupted, all.tflTimestamp(), all.fetchedAt(),
-                all.fetchedBy(), TubeStatus.Source.TFL);
+    public CompletionStage<TubeStatus> fetchUnplannedDisruptionsAsync() {
+        return fetchAllLinesAsync().thenApply(all -> {
+            List<LineStatus> disrupted = all.lines().stream()
+                    .filter(this::hasUnplannedDisruption)
+                    .toList();
+            return new TubeStatus(disrupted, all.tflTimestamp(), all.fetchedAt(),
+                    all.fetchedBy(), TubeStatus.Source.TFL);
+        });
     }
 
     private boolean hasUnplannedDisruption(LineStatus line) {
         if (line.disruptions() == null || line.disruptions().isEmpty()) {
             return false;
         }
-        // Has at least one unplanned disruption
         return line.disruptions().stream().anyMatch(d -> !d.isPlanned());
     }
 
-    // Internal fetch methods
+    // Circuit breaker wrapper
+    private CompletableFuture<TubeStatus> executeWithCircuitBreaker(
+            java.util.function.Supplier<CompletionStage<TubeStatus>> operation) {
 
-    private TubeStatus doFetchAllLines() {
+        CircuitBreaker.State state = circuitBreaker.getState();
+        if (state == CircuitBreaker.State.OPEN) {
+            return CompletableFuture.failedFuture(
+                    new CircuitBreaker.CircuitOpenException("tfl-api", Duration.ofSeconds(30)));
+        }
+
+        return operation.get()
+                .whenComplete((result, error) -> {
+                    if (error != null) {
+                        circuitBreaker.onFailure(error);
+                    } else {
+                        circuitBreaker.onSuccess();
+                    }
+                })
+                .toCompletableFuture();
+    }
+
+    // Internal fetch methods using Pekko HTTP
+
+    private CompletionStage<TubeStatus> doFetchAllLines() {
         String url = TFL_BASE_URL + "/Line/Mode/tube/Status";
-        List<TflLineResponse> responses = fetchAndParse(url, new TypeReference<>() {});
-        return toTubeStatus(responses);
+        return fetchAndParse(url, new TypeReference<List<TflLineResponse>>() {})
+                .thenApply(this::toTubeStatus);
     }
 
-    private TubeStatus doFetchLine(String lineId) {
+    private CompletionStage<TubeStatus> doFetchLine(String lineId) {
         String url = TFL_BASE_URL + "/Line/" + lineId + "/Status";
-        List<TflLineResponse> responses = fetchAndParse(url, new TypeReference<>() {});
-        return toTubeStatus(responses);
+        return fetchAndParse(url, new TypeReference<List<TflLineResponse>>() {})
+                .thenApply(this::toTubeStatus);
     }
 
-    private TubeStatus doFetchLineWithDateRange(String lineId, LocalDate startDate, LocalDate endDate) {
+    private CompletionStage<TubeStatus> doFetchLineWithDateRange(
+            String lineId, LocalDate startDate, LocalDate endDate) {
         String url = String.format("%s/Line/%s/Status/%s/to/%s",
                 TFL_BASE_URL, lineId,
                 startDate.format(DateTimeFormatter.ISO_LOCAL_DATE),
                 endDate.format(DateTimeFormatter.ISO_LOCAL_DATE));
-        List<TflLineResponse> responses = fetchAndParse(url, new TypeReference<>() {});
-        return toTubeStatus(responses);
+        return fetchAndParse(url, new TypeReference<List<TflLineResponse>>() {})
+                .thenApply(this::toTubeStatus);
     }
 
-    private <T> T fetchAndParse(String url, TypeReference<T> typeRef) {
+    private <T> CompletionStage<T> fetchAndParse(String url, TypeReference<T> typeRef) {
         log.debug("Fetching from TfL: {}", url);
 
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(url))
-                .timeout(REQUEST_TIMEOUT)
-                .header("Accept", "application/json")
-                .GET()
-                .build();
+        HttpRequest request = HttpRequest.create(url);
 
-        try {
-            HttpResponse<String> response = httpClient.send(request,
-                    HttpResponse.BodyHandlers.ofString());
+        return http.singleRequest(request)
+                .thenCompose(response -> handleResponse(response, typeRef))
+                .whenComplete((result, error) -> {
+                    if (error != null) {
+                        log.warn("TfL fetch failed: {}", error.getMessage());
+                    } else {
+                        log.debug("TfL fetch succeeded");
+                    }
+                });
+    }
 
-            int status = response.statusCode();
-            log.debug("TfL response status: {}", status);
+    private <T> CompletionStage<T> handleResponse(HttpResponse response, TypeReference<T> typeRef) {
+        int status = response.status().intValue();
+        log.debug("TfL response status: {}", status);
 
-            if (status >= 400) {
-                throw new HttpStatusException(status,
-                        "TfL API returned " + status + ": " + response.body());
-            }
+        if (status >= 400) {
+            // Drain the entity to free connection
+            response.discardEntityBytes(materializer);
 
-            return objectMapper.readValue(response.body(), typeRef);
-
-        } catch (HttpStatusException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to fetch from TfL: " + e.getMessage(), e);
+            return CompletableFuture.failedFuture(
+                    new HttpStatusException(status, "TfL API returned " + status));
         }
+
+        // Collect response body
+        return response.entity()
+                .toStrict(REQUEST_TIMEOUT.toMillis(), materializer)
+                .thenApply(entity -> {
+                    try {
+                        String body = entity.getData().utf8String();
+                        return objectMapper.readValue(body, typeRef);
+                    } catch (Exception e) {
+                        throw new RuntimeException("Failed to parse TfL response", e);
+                    }
+                })
+                .toCompletableFuture();
     }
 
     private TubeStatus toTubeStatus(List<TflLineResponse> responses) {

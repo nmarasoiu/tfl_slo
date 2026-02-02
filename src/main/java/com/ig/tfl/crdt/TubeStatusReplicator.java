@@ -159,7 +159,8 @@ public class TubeStatusReplicator extends AbstractBehavior<TubeStatusReplicator.
     }
 
     private void fetchFromTfl() {
-        CompletableFuture.supplyAsync(() -> tflClient.fetchAllLines())
+        // Pekko HTTP is non-blocking, just pipe result back to actor
+        tflClient.fetchAllLinesAsync()
                 .whenComplete((status, error) ->
                         getContext().getSelf().tell(new TflFetchComplete(status, error)));
     }
