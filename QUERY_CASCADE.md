@@ -91,20 +91,22 @@ query-cascade:
 
 ## Tier Details
 
-### Tier 0: Local RAM (Caffeine Cache)
+### Tier 0: Local CRDT Replica
 
 **Purpose:** Instant response for hot data.
 
+**Note:** No separate Caffeine cache needed - the CRDT local replica IS the in-memory cache.
+
 **Behavior:**
-1. Check local Caffeine cache
+1. Read from CRDT local replica (already in-memory)
 2. If entry exists AND `now - fetchedAt < freshnessThreshold`:
    - Return immediately
    - Source: `LOCAL`
 3. Else: proceed to Tier 1
 
-**Cost:** ~1μs (in-process hashmap lookup)
+**Cost:** ~1μs (in-process read from CRDT replica)
 
-**Cache eviction:** LRU, max 1000 entries (way more than needed for 11 lines)
+**Why not Caffeine:** The LWW-Register CRDT maintains a local replica on each node. Reading it is already O(1) in-memory. Adding Caffeine would be caching what's already cached.
 
 ---
 

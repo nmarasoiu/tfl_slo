@@ -368,36 +368,58 @@ For I/O-bound coalescing (waiting on TfL API): **virtual threads are perfect**.
 
 ---
 
-## Our Choice: Simple + Virtual Threads
+## Our Choice: CRDT + Actor (No Caffeine Needed)
 
 For tube status service:
-- ~100-1000 req/s expected (could handle 100K+ with virtual threads)
+- ~100-1000 req/s expected
 - Latency requirement: <100ms p99 (trivial)
-- Already have Caffeine
-- Java 21 with virtual threads
+- Already have CRDT with local replica
+- Actor model for coalescing
+
+**Key insight:** The CRDT local replica IS the cache. Caffeine would be redundant.
+
+```
+┌─────────────────────────────────────────────────┐
+│              TubeStatusReplicator               │
+│                   (Actor)                       │
+│                                                 │
+│  ┌─────────────┐      ┌──────────────────────┐ │
+│  │   Mailbox   │ ───► │  LWW-Register CRDT   │ │
+│  │ (coalesces) │      │  (local replica =    │ │
+│  │             │      │   in-memory cache)   │ │
+│  └─────────────┘      └──────────────────────┘ │
+│                              ▲                  │
+│                              │ gossip           │
+│                         other nodes             │
+└─────────────────────────────────────────────────┘
+```
+
+**Why no Caffeine:**
+
+| Need | Solution |
+|------|----------|
+| Fast local reads | CRDT local replica (already in-memory) |
+| Coalescing | Actor processes one message at a time |
+| Replication | CRDT gossip |
 
 **Implementation:**
 ```java
-private final ReentrantLock lock = new ReentrantLock();
-private final Cache<String, TubeStatus> cache = Caffeine.newBuilder()
-    .expireAfterWrite(30, TimeUnit.SECONDS)
-    .build();
+// Actor handles everything
+private Behavior<Command> onGetStatus(GetStatus msg) {
+    TubeStatus current = crdtLocalReplica.get();  // ~μs, in-memory
 
-// Simple blocking code, scales with virtual threads
-public TubeStatus getStatus() {
-    lock.lock();
-    try {
-        return cache.get("all-lines", key -> queryCascade.execute());
-    } finally {
-        lock.unlock();
+    if (isFreshEnough(current)) {
+        msg.replyTo.tell(current);
+    } else {
+        // Stash or return stale while refreshing
+        triggerRefresh();
+        msg.replyTo.tell(current);  // Return what we have
     }
+    return this;
 }
 ```
 
-**Why this works:**
-- `ReentrantLock` doesn't pin virtual threads
-- Caffeine's internal coalescing handles concurrent loads
-- Simple to reason about, test, debug
+**One data structure, one source of truth, no redundant layers.**
 
 **Document the alternatives** (this file) to show we considered them.
 
