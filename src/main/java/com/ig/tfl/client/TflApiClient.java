@@ -30,10 +30,10 @@ import static com.ig.tfl.resilience.RetryPolicy.HttpStatusException;
 /**
  * Client for TfL API using Pekko HTTP (non-blocking).
  */
-public class TflApiClient {
+public class TflApiClient implements TflClient {
     private static final Logger log = LoggerFactory.getLogger(TflApiClient.class);
 
-    private static final String TFL_BASE_URL = "https://api.tfl.gov.uk";
+    private static final String DEFAULT_TFL_BASE_URL = "https://api.tfl.gov.uk";
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(10);
 
     private final ActorSystem<?> system;
@@ -43,10 +43,16 @@ public class TflApiClient {
     private final CircuitBreaker circuitBreaker;
     private final RetryPolicy retryPolicy;
     private final String nodeId;
+    private final String baseUrl;
 
     public TflApiClient(ActorSystem<?> system, String nodeId) {
+        this(system, nodeId, DEFAULT_TFL_BASE_URL);
+    }
+
+    public TflApiClient(ActorSystem<?> system, String nodeId, String baseUrl) {
         this.system = system;
         this.nodeId = nodeId;
+        this.baseUrl = baseUrl;
         this.http = Http.get(system);
         this.materializer = Materializer.createMaterializer(system);
         this.objectMapper = new ObjectMapper()
@@ -88,8 +94,7 @@ public class TflApiClient {
             List<LineStatus> disrupted = all.lines().stream()
                     .filter(this::hasUnplannedDisruption)
                     .toList();
-            return new TubeStatus(disrupted, all.tflTimestamp(), all.fetchedAt(),
-                    all.fetchedBy(), TubeStatus.Source.TFL);
+            return new TubeStatus(disrupted, all.queriedAt(), all.queriedBy());
         });
     }
 
@@ -124,13 +129,13 @@ public class TflApiClient {
     // Internal fetch methods using Pekko HTTP
 
     private CompletionStage<TubeStatus> doFetchAllLines() {
-        String url = TFL_BASE_URL + "/Line/Mode/tube/Status";
+        String url = baseUrl + "/Line/Mode/tube/Status";
         return fetchAndParse(url, new TypeReference<List<TflLineResponse>>() {})
                 .thenApply(this::toTubeStatus);
     }
 
     private CompletionStage<TubeStatus> doFetchLine(String lineId) {
-        String url = TFL_BASE_URL + "/Line/" + lineId + "/Status";
+        String url = baseUrl + "/Line/" + lineId + "/Status";
         return fetchAndParse(url, new TypeReference<List<TflLineResponse>>() {})
                 .thenApply(this::toTubeStatus);
     }
@@ -138,7 +143,7 @@ public class TflApiClient {
     private CompletionStage<TubeStatus> doFetchLineWithDateRange(
             String lineId, LocalDate startDate, LocalDate endDate) {
         String url = String.format("%s/Line/%s/Status/%s/to/%s",
-                TFL_BASE_URL, lineId,
+                baseUrl, lineId,
                 startDate.format(DateTimeFormatter.ISO_LOCAL_DATE),
                 endDate.format(DateTimeFormatter.ISO_LOCAL_DATE));
         return fetchAndParse(url, new TypeReference<List<TflLineResponse>>() {})
@@ -192,14 +197,7 @@ public class TflApiClient {
                 .map(LineStatus::fromTflResponse)
                 .toList();
 
-        Instant now = Instant.now();
-        return new TubeStatus(
-                lines,
-                now,           // TfL doesn't always include timestamp, use fetch time
-                now,
-                nodeId,
-                TubeStatus.Source.TFL
-        );
+        return new TubeStatus(lines, Instant.now(), nodeId);
     }
 
     /**

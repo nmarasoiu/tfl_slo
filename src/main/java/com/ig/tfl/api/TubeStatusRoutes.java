@@ -202,12 +202,9 @@ public class TubeStatusRoutes extends AllDirectives {
         return new ApiResponse(
                 status.lines(),
                 new ApiResponse.Meta(
-                        status.tflTimestamp(),
-                        status.fetchedAt(),
-                        status.fetchedBy(),
-                        status.freshnessMs(),
-                        status.source().name(),
-                        status.confidence().name()
+                        status.queriedAt(),
+                        status.queriedBy(),
+                        status.ageMs()
                 )
         );
     }
@@ -237,12 +234,9 @@ public class TubeStatusRoutes extends AllDirectives {
             Meta meta
     ) {
         public record Meta(
-                java.time.Instant dataAsOf,
-                java.time.Instant fetchedAt,
-                String fetchedBy,
-                long freshnessMs,
-                String source,
-                String confidence
+                java.time.Instant queriedAt,  // When TfL was queried (immutable)
+                String queriedBy,             // Which node queried
+                long ageMs                    // How old this data is
         ) {}
     }
 }

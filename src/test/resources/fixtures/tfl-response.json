@@ -1,0 +1,131 @@
+[
+  {
+    "id": "bakerloo",
+    "name": "Bakerloo",
+    "lineStatuses": [
+      {
+        "statusSeverity": 10,
+        "statusSeverityDescription": "Good Service",
+        "disruption": null
+      }
+    ]
+  },
+  {
+    "id": "central",
+    "name": "Central",
+    "lineStatuses": [
+      {
+        "statusSeverity": 10,
+        "statusSeverityDescription": "Good Service",
+        "disruption": null
+      }
+    ]
+  },
+  {
+    "id": "circle",
+    "name": "Circle",
+    "lineStatuses": [
+      {
+        "statusSeverity": 10,
+        "statusSeverityDescription": "Good Service",
+        "disruption": null
+      }
+    ]
+  },
+  {
+    "id": "district",
+    "name": "District",
+    "lineStatuses": [
+      {
+        "statusSeverity": 5,
+        "statusSeverityDescription": "Minor Delays",
+        "disruption": {
+          "categoryDescription": "RealTime",
+          "description": "District Line: Minor delays due to an earlier signal failure at Victoria.",
+          "isPlanned": false
+        }
+      }
+    ]
+  },
+  {
+    "id": "hammersmith-city",
+    "name": "Hammersmith & City",
+    "lineStatuses": [
+      {
+        "statusSeverity": 10,
+        "statusSeverityDescription": "Good Service",
+        "disruption": null
+      }
+    ]
+  },
+  {
+    "id": "jubilee",
+    "name": "Jubilee",
+    "lineStatuses": [
+      {
+        "statusSeverity": 10,
+        "statusSeverityDescription": "Good Service",
+        "disruption": null
+      }
+    ]
+  },
+  {
+    "id": "metropolitan",
+    "name": "Metropolitan",
+    "lineStatuses": [
+      {
+        "statusSeverity": 10,
+        "statusSeverityDescription": "Good Service",
+        "disruption": null
+      }
+    ]
+  },
+  {
+    "id": "northern",
+    "name": "Northern",
+    "lineStatuses": [
+      {
+        "statusSeverity": 10,
+        "statusSeverityDescription": "Good Service",
+        "disruption": null
+      }
+    ]
+  },
+  {
+    "id": "piccadilly",
+    "name": "Piccadilly",
+    "lineStatuses": [
+      {
+        "statusSeverity": 3,
+        "statusSeverityDescription": "Part Suspended",
+        "disruption": {
+          "categoryDescription": "PlannedWork",
+          "description": "Piccadilly Line: No service between Arnos Grove and Cockfosters due to planned engineering work.",
+          "isPlanned": true
+        }
+      }
+    ]
+  },
+  {
+    "id": "victoria",
+    "name": "Victoria",
+    "lineStatuses": [
+      {
+        "statusSeverity": 10,
+        "statusSeverityDescription": "Good Service",
+        "disruption": null
+      }
+    ]
+  },
+  {
+    "id": "waterloo-city",
+    "name": "Waterloo & City",
+    "lineStatuses": [
+      {
+        "statusSeverity": 10,
+        "statusSeverityDescription": "Good Service",
+        "disruption": null
+      }
+    ]
+  }
+]

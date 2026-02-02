@@ -6,50 +6,33 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import java.io.Serializable;
 import java.time.Instant;
 import java.util.List;
-import java.util.Objects;
 
 /**
  * Represents the status of all tube lines at a point in time.
- * This is the value stored in our LWW-Map CRDT.
+ * This is the value stored in our LWW-Register CRDT.
+ *
+ * Simplicity: One timestamp (queriedAt) that never changes through replication.
+ * Clients see exactly when TfL was last successfully queried.
  */
 public record TubeStatus(
         List<LineStatus> lines,
-        Instant tflTimestamp,    // When TfL says the data is from
-        Instant fetchedAt,       // When we fetched it
-        String fetchedBy,        // Which node fetched it
-        Source source            // Where we got it from
+        Instant queriedAt,       // When TfL API was queried (immutable through CRDT)
+        String queriedBy         // Which node queried TfL (for debugging)
 ) implements Serializable {
 
-    public enum Source {
-        TFL,    // Direct from TfL API
-        PEER,   // From another node via CRDT
-        CACHE   // From local cache (no recent fetch)
+    /**
+     * Age of this data in milliseconds.
+     */
+    public long ageMs() {
+        return Instant.now().toEpochMilli() - queriedAt.toEpochMilli();
     }
 
-    public enum Confidence {
-        FRESH,      // < 5 min old
-        STALE,      // 5-30 min old
-        DEGRADED    // > 30 min old or circuit open
-    }
-
-    public long freshnessMs() {
-        return Instant.now().toEpochMilli() - fetchedAt.toEpochMilli();
-    }
-
-    public Confidence confidence() {
-        long ageMs = freshnessMs();
-        if (ageMs < 5 * 60 * 1000) return Confidence.FRESH;
-        if (ageMs < 30 * 60 * 1000) return Confidence.STALE;
-        return Confidence.DEGRADED;
-    }
-
+    /**
+     * Used by LWW-Register to determine which value wins.
+     */
     public boolean isFresherThan(TubeStatus other) {
         if (other == null) return true;
-        return this.fetchedAt.isAfter(other.fetchedAt);
-    }
-
-    public TubeStatus withSource(Source newSource) {
-        return new TubeStatus(lines, tflTimestamp, fetchedAt, fetchedBy, newSource);
+        return this.queriedAt.isAfter(other.queriedAt);
     }
 
     /**

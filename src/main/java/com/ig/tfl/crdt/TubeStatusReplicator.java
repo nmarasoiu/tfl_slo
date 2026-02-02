@@ -1,6 +1,6 @@
 package com.ig.tfl.crdt;
 
-import com.ig.tfl.client.TflApiClient;
+import com.ig.tfl.client.TflClient;
 import com.ig.tfl.model.TubeStatus;
 import org.apache.pekko.actor.typed.ActorRef;
 import org.apache.pekko.actor.typed.Behavior;
@@ -38,7 +38,7 @@ public class TubeStatusReplicator extends AbstractBehavior<TubeStatusReplicator.
     private final String nodeId;
 
     // Dependencies
-    private final TflApiClient tflClient;
+    private final TflClient tflClient;
     private final ReplicatorMessageAdapter<Command, LWWRegister<TubeStatus>> replicatorAdapter;
     private final SelfCluster selfCluster;
 
@@ -64,7 +64,7 @@ public class TubeStatusReplicator extends AbstractBehavior<TubeStatusReplicator.
     private record TflFetchComplete(TubeStatus status, Throwable error) implements Command {}
 
     public static Behavior<Command> create(
-            TflApiClient tflClient,
+            TflClient tflClient,
             String nodeId,
             Duration refreshInterval,
             Duration recentEnoughThreshold) {
@@ -77,7 +77,7 @@ public class TubeStatusReplicator extends AbstractBehavior<TubeStatusReplicator.
     private TubeStatusReplicator(
             ActorContext<Command> context,
             TimerScheduler<Command> timers,
-            TflApiClient tflClient,
+            TflClient tflClient,
             String nodeId,
             Duration refreshInterval,
             Duration recentEnoughThreshold) {
@@ -140,13 +140,13 @@ public class TubeStatusReplicator extends AbstractBehavior<TubeStatusReplicator.
 
             if (isFreshEnough(peerStatus)) {
                 log.debug("Peer data is fresh enough ({}ms old), using it",
-                        peerStatus.freshnessMs());
-                currentStatus = peerStatus.withSource(TubeStatus.Source.PEER);
+                        peerStatus.ageMs());
+                currentStatus = peerStatus;
                 return this;
             }
 
             log.debug("Peer data is stale ({}ms old), fetching from TfL",
-                    peerStatus != null ? peerStatus.freshnessMs() : "null");
+                    peerStatus != null ? peerStatus.ageMs() : "null");
         } else if (response instanceof Replicator.NotFound<?>) {
             log.debug("No peer data found, fetching from TfL");
         } else if (response instanceof Replicator.GetFailure<?>) {
@@ -214,7 +214,7 @@ public class TubeStatusReplicator extends AbstractBehavior<TubeStatusReplicator.
 
     private boolean isFreshEnough(TubeStatus status) {
         if (status == null) return false;
-        return status.fetchedAt().isAfter(
+        return status.queriedAt().isAfter(
                 Instant.now().minus(recentEnoughThreshold));
     }
 }

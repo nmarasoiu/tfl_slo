@@ -45,7 +45,8 @@ dependencies {
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
     testImplementation("org.assertj:assertj-core:3.25.3")
     testImplementation("org.mockito:mockito-core:5.11.0")
-    testImplementation("com.github.tomakehurst:wiremock-jre8:3.0.1")
+    testImplementation("org.wiremock:wiremock:3.4.2")
+    testImplementation("org.awaitility:awaitility:4.2.0")
 
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }

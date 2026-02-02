@@ -13,9 +13,8 @@ Client Request
       │ async refresh          │
       ▼                        │
 ┌─────────────┐         ┌──────┴──────┐
-│   TfL API   │────────►│    Cache    │
-└─────────────┘  write  │ (Hazelcast/ │
-                        │   Redis)    │
+│   TfL API   │────────►│ CRDT Cache  │
+└─────────────┘  write  │ (Pekko DD)  │
                         └─────────────┘
 ```
 
@@ -24,68 +23,83 @@ Client Request
 **Always return data from cache. Never block on TfL API for client requests.**
 
 This decouples our availability from TfL's availability:
-- TfL down → we still serve (stale but available)
+- TfL down → we still serve (client sees age via `ageMs`)
 - TfL slow → our latency unaffected
 - TfL rate-limits us → clients unaffected
 
-### Response Schema
+### Response Schema (Simplified)
 
-Every response includes freshness metadata **in the body** (not just HTTP headers):
+Every response includes one immutable timestamp:
 
 ```json
 {
-  "line": "central",
-  "status": "Good Service",
-  "disruptions": [],
-
+  "lines": [...],
   "meta": {
-    "dataAsOf": "2026-02-02T14:30:00Z",
-    "fetchedAt": "2026-02-02T14:30:05Z",
-    "freshnessSeconds": 125,
-    "source": "CACHE",
-    "confidence": "FRESH"
+    "queriedAt": "2026-02-02T14:30:00Z",
+    "queriedBy": "node-1",
+    "ageMs": 125000
   }
 }
 ```
 
 | Field | Meaning |
 |-------|---------|
-| `dataAsOf` | TfL's timestamp for this data (from their response) |
-| `fetchedAt` | When we last successfully fetched from TfL |
-| `freshnessSeconds` | Age of data: `now() - fetchedAt` |
-| `source` | `CACHE`, `LIVE`, or `ESTIMATED` |
-| `confidence` | `FRESH` (<5min), `STALE` (5-30min), `DEGRADED` (>30min) |
+| `queriedAt` | UTC timestamp when TfL was successfully queried (immutable through CRDT replication) |
+| `queriedBy` | Which node performed the query (debugging) |
+| `ageMs` | Age of data in milliseconds: `now() - queriedAt` |
 
-### Why in the Response Body?
+### Why This Simplicity?
 
-1. **Client awareness** - clients can make decisions based on freshness
-2. **Auditable** - the response is self-describing
-3. **Works with any client** - no HTTP header parsing required
-4. **Cacheable downstream** - proxies won't strip it
+Previous design had:
+- `tflTimestamp` - was identical to fetchedAt (TfL doesn't reliably include timestamps)
+- `fetchedAt` - redundant with above
+- `source` (TFL/PEER/CACHE) - meaningless with CRDT (all replicas are equivalent)
+- `confidence` (FRESH/STALE/DEGRADED) - client can derive from ageMs
 
-### Degradation Modes
+**One timestamp is enough.** It never changes through CRDT replication. Clients know exactly when TfL was last successfully queried.
 
-| TfL State | Our Behavior | `source` | `confidence` |
-|-----------|--------------|----------|--------------|
-| Healthy | Background refresh every 30s | `CACHE` | `FRESH` |
-| Slow (>2s) | Serve cache, keep trying | `CACHE` | `FRESH` |
-| 5xx errors | Serve cache, circuit breaker | `CACHE` | `STALE` |
-| Down >10min | Serve cache, alert | `CACHE` | `DEGRADED` |
-| Down >30min | Optional: historical estimation | `ESTIMATED` | `DEGRADED` |
+---
 
-### Historical Estimation (Stretch Goal)
+## Future Enhancement: Explicit Stale Data Serving
 
-Tube status follows patterns:
-- Weekday rush hours → higher disruption probability
-- Weekends → engineering works
-- Historical same-day-of-week data
+### The Problem
 
-If TfL is down for extended period, we could:
-1. Use last known state (most conservative)
-2. Use historical probability for this time/day
-3. Flag clearly as `ESTIMATED`
+Currently, if data is old (e.g., TfL was unreachable for 2 hours), we still return it. This is dangerous because clients might not notice the staleness.
 
-This is **transparent degradation** - we never lie about what we know.
+### Proposed Solution (Not Implemented)
+
+Add explicit parameter to request stale data:
+
+```
+GET /api/v1/tube/status                    → 503 if ageMs > threshold
+GET /api/v1/tube/status?allowStale=true    → Returns data with warning
+GET /api/v1/tube/status?maxAgeMs=300000    → 503 if older than 5 minutes
+```
+
+Response when stale:
+```json
+{
+  "lines": [...],
+  "meta": {
+    "queriedAt": "2026-02-02T12:30:00Z",
+    "ageMs": 7200000,
+    "warning": "Data is 2 hours old. TfL API unreachable since 12:30 UTC."
+  }
+}
+```
+
+### Complexity/Accuracy Tradeoff
+
+| Approach | Complexity | Accuracy | Risk |
+|----------|------------|----------|------|
+| Always serve | Low | Variable | Silent staleness |
+| Fail if stale | Low | High | Reduced availability |
+| Explicit param | Medium | High | Best of both |
+| Historical estimation | High | Low | Invented data |
+
+**Current choice: Always serve with transparent ageMs. Client decides.**
+
+**Future: Add explicit `allowStale` parameter for safety-critical clients.**
 
 ---
 
@@ -96,7 +110,7 @@ This is **transparent degradation** - we never lie about what we know.
 The circuit breaker protects **background refresh**, not client requests:
 
 ```
-Client ──► Cache ──► Response (always works)
+Client ──► CRDT Cache ──► Response (always works)
               ▲
               │
          Background
@@ -105,18 +119,15 @@ Client ──► Cache ──► Response (always works)
 
 Circuit states:
 - **CLOSED**: Normal operation, refresh every 30s
-- **OPEN**: Stop hammering TfL, serve stale cache, wait 30s
+- **OPEN**: Stop hammering TfL, serve cached data, wait 30s
 - **HALF_OPEN**: Try one request, if success → CLOSED, if fail → OPEN
 
-### Why 5 Failures / 30s Recovery?
+### Configuration
 
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
 | Failure threshold | 5 | Filters transient blips, catches real outages |
-| Recovery timeout | 30s | Matches TfL's typical recovery time for transient issues |
-| Sliding window | 60s | Failures must be recent to count |
-
-These are **starting points**. In production, tune based on observed TfL behavior.
+| Recovery timeout | 30s | Matches TfL's typical recovery time |
 
 ---
 
@@ -133,58 +144,38 @@ Attempt 4: 4s ± 1s
 
 Total worst case: ~7s
 
-### Why Jitter?
-
-Without jitter, if TfL recovers after an outage, all clients retry at the same moment → thundering herd → TfL goes down again.
-
-Jitter spreads retries across time, allowing gradual recovery.
-
 ### What We Retry
 
 | Response | Retry? | Rationale |
 |----------|--------|-----------|
 | 5xx | Yes | Server error, might recover |
+| 429 | Yes | Rate limited, backoff helps |
 | Timeout | Yes | Network blip |
-| 429 | Yes, with Retry-After | Respect their rate limit |
 | 4xx (except 429) | No | Client error, won't fix itself |
-| Connection refused | Yes | Server might be restarting |
 
 ---
 
 ## Rate Limiting
 
-### Two Dimensions
+### Token Bucket per Client
 
-1. **Inbound** (our clients → us): 100 req/min per IP
-2. **Outbound** (us → TfL): Respect TfL's limits, likely ~500 req/min
-
-### Implementation
-
-Inbound: Token bucket per client IP
-- Bucket size: 100
-- Refill rate: 100/min
-- Exceed → 429 with `Retry-After: <seconds until tokens available>`
-
-Outbound: Global semaphore for TfL calls
-- Shared across all instances (via Redis/Hazelcast)
-- Prevents thundering herd on TfL
+- Bucket size: 100 tokens
+- Refill rate: 100/minute
+- Exceed → 429 with `Retry-After` header
 
 ---
 
-## Redundancy
+## CRDT Replication
 
-| Component | Redundancy Strategy |
-|-----------|---------------------|
-| Service instances | 3+ replicas, load balanced |
-| Cache (Hazelcast/Redis) | Clustered, replicated |
-| Background refresh | Leader election, one writer |
+Using Pekko Distributed Data with LWW-Register:
+- Each node can poll TfL independently
+- CRDT replication naturally shares data
+- LWW ensures freshest data wins
+- No leader election needed (simpler, more available)
 
-### Leader Election for Refresh
-
-Only one instance should refresh from TfL at a time:
-- Prevents duplicate requests
-- Reduces TfL load
-- Leader writes to shared cache
-- All instances read from cache
-
-If leader dies, another instance takes over (via Hazelcast/Redis lock).
+```
+Node-1 ──► TfL ──► LWW-Register ◄──► LWW-Register ◄── Node-2 ──► TfL
+                        │                   │
+                        └───────────────────┘
+                          (gossip replication)
+```
