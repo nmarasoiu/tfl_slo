@@ -155,6 +155,24 @@ scatter-gather queries to peers would reduce TfL calls further.
 
 **Local replica IS the cache. No separate Caffeine layer needed.**
 
+### Why No Durable Storage?
+
+Considered and rejected. For data loss to matter, you'd need:
+1. All nodes crash simultaneously
+2. AND data in DB still fresh enough to be useful (tube status has short TTL)
+3. AND DB reachable while TfL is not
+
+This is an unlikely conjunction. On restart, nodes warm up from TfL in seconds.
+The "disaster recovery" for a cache is just... refetching from origin.
+
+If we added persistence, we'd be optimizing for a scenario where:
+- TfL is down (can't refetch)
+- All our nodes crashed (lost in-memory)
+- But our DB is up (can recover)
+- And the persisted data is < 5 minutes old (still useful)
+
+Over-engineering. The simpler answer: run enough nodes that simultaneous crash is unlikely.
+
 ---
 
 ## Coalescing: Actor Mailbox
