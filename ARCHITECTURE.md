@@ -1,4 +1,4 @@
-# Architecture Decisions
+# Architecture
 
 ## Core Design: Cache-First with Freshness Transparency
 
@@ -18,18 +18,11 @@ Client Request
                         └─────────────┘
 ```
 
-### Key Principle
+**Principle:** Always return data from cache. Never block on TfL API for client requests.
 
-**Always return data from cache. Never block on TfL API for client requests.**
+---
 
-This decouples our availability from TfL's availability:
-- TfL down → we still serve (client sees age via `ageMs`)
-- TfL slow → our latency unaffected
-- TfL rate-limits us → clients unaffected
-
-### Response Schema (Simplified)
-
-Every response includes one immutable timestamp:
+## Response Schema
 
 ```json
 {
@@ -44,70 +37,133 @@ Every response includes one immutable timestamp:
 
 | Field | Meaning |
 |-------|---------|
-| `queriedAt` | UTC timestamp when TfL was successfully queried (immutable through CRDT replication) |
-| `queriedBy` | Which node performed the query (debugging) |
-| `ageMs` | Age of data in milliseconds: `now() - queriedAt` |
+| `queriedAt` | UTC timestamp when TfL was queried (immutable through CRDT) |
+| `queriedBy` | Which node performed the query |
+| `ageMs` | Age of data in milliseconds |
 
-### Why This Simplicity?
-
-Previous design had:
-- `tflTimestamp` - was identical to fetchedAt (TfL doesn't reliably include timestamps)
-- `fetchedAt` - redundant with above
-- `source` (TFL/PEER/CACHE) - meaningless with CRDT (all replicas are equivalent)
-- `confidence` (FRESH/STALE/DEGRADED) - client can derive from ageMs
-
-**One timestamp is enough.** It never changes through CRDT replication. Clients know exactly when TfL was last successfully queried.
+**One timestamp. Immutable. Client knows the truth.**
 
 ---
 
-## Future Enhancement: Explicit Stale Data Serving
-
-### The Problem
-
-Currently, if data is old (e.g., TfL was unreachable for 2 hours), we still return it. This is dangerous because clients might not notice the staleness.
-
-### Proposed Solution (Not Implemented)
-
-Add explicit parameter to request stale data:
+## System Diagram
 
 ```
-GET /api/v1/tube/status                    → 503 if ageMs > threshold
-GET /api/v1/tube/status?allowStale=true    → Returns data with warning
-GET /api/v1/tube/status?maxAgeMs=300000    → 503 if older than 5 minutes
+                            ┌──────────────────────────────────────────────┐
+                            │                    NODE                      │
+                            │                                              │
+   HTTP Request             │  ┌─────────────────────────────────────┐    │
+        │                   │  │         TubeStatusReplicator        │    │
+        │                   │  │              (Actor)                │    │
+        ▼                   │  │                                     │    │
+┌───────────────┐           │  │  ┌─────────────────────────────┐   │    │
+│  HTTP Routes  │◄──────────┼──┤  │ currentStatus (local copy) │   │    │
+│   (Handler)   │  ask      │  │  └─────────────────────────────┘   │    │
+└───────────────┘           │  └──────────────┬──────────────────────┘    │
+        │                   │                 │                           │
+        │                   │                 │ read/write                │
+        │                   │                 ▼                           │
+        │                   │  ┌─────────────────────────────────────┐    │
+        │                   │  │      Pekko Replicator (Actor)       │    │
+        │                   │  │                                     │    │
+        │                   │  │  ╔═══════════════════════════════╗  │    │
+        │                   │  │  ║   LWW-Register<TubeStatus>    ║  │    │
+        │                   │  │  ║         (CRDT)                ║  │    │
+        │                   │  │  ╚═══════════════════════════════╝  │    │
+        │                   │  └──────────────┬──────────────────────┘    │
+        │                   │                 │ gossip                    │
+        │                   │                 ▼                           │
+        │                   │         ═══════════════════                 │
+        │                   │          To other nodes                     │
+        │                   └──────────────────────────────────────────────┘
+        │
+        │ rate limit check
+        ▼
+┌───────────────┐           ┌─────────────────┐
+│  RateLimiter  │           │   TflApiClient  │───► TfL API
+│ (per-client)  │           │ + CircuitBreaker│
+└───────────────┘           └─────────────────┘
 ```
-
-Response when stale:
-```json
-{
-  "lines": [...],
-  "meta": {
-    "queriedAt": "2026-02-02T12:30:00Z",
-    "ageMs": 7200000,
-    "warning": "Data is 2 hours old. TfL API unreachable since 12:30 UTC."
-  }
-}
-```
-
-### Complexity/Accuracy Tradeoff
-
-| Approach | Complexity | Accuracy | Risk |
-|----------|------------|----------|------|
-| Always serve | Low | Variable | Silent staleness |
-| Fail if stale | Low | High | Reduced availability |
-| Explicit param | Medium | High | Best of both |
-| Historical estimation | High | Low | Invented data |
-
-**Current choice: Always serve with transparent ageMs. Client decides.**
-
-**Future: Add explicit `allowStale` parameter for safety-critical clients.**
 
 ---
 
-## Circuit Breaker Strategy
+## Multi-Node CRDT Replication
 
-### When Circuit Opens
+```
+   NODE 1                    NODE 2                    NODE 3
+  ┌──────────────────┐      ┌──────────────────┐      ┌──────────────────┐
+  │ LWW-Register     │      │ LWW-Register     │      │ LWW-Register     │
+  │ (local replica)  │◄────►│ (local replica)  │◄────►│ (local replica)  │
+  └────────┬─────────┘      └────────┬─────────┘      └────────┬─────────┘
+           │                         │                         │
+           └─────────────────────────┴─────────────────────────┘
+                              gossip protocol
+                         (delta-based, crdt merge)
+```
 
-The circuit breaker protects **background refresh**, not client requests:
+- Each node can poll TfL independently
+- CRDT replication shares data automatically
+- LWW (Last-Writer-Wins): freshest timestamp wins
+- No leader election needed
+
+---
+
+## Query Tiers
+
+```
+Request
+   │
+   ▼
+Tier 0: Local CRDT replica ──── FRESH ────► Response
+   │
+   │ STALE
+   ▼
+Tier 1: Peer scatter-gather ──── PEER FRESH ────► Response
+   │
+   │ ALL STALE
+   ▼
+Tier N: TfL API ──── SUCCESS ────► Response + update CRDT
+   │
+   │ FAILURE
+   ▼
+Fallback: Return stale with ageMs
+```
+
+**Local replica IS the cache. No separate Caffeine layer needed.**
+
+---
+
+## Coalescing: Actor Mailbox
+
+```
+┌─────────────────────────────────────────────────┐
+│              TubeStatusReplicator               │
+│                                                 │
+│  ┌─────────────┐      ┌──────────────────────┐ │
+│  │   Mailbox   │ ───► │  LWW-Register CRDT   │ │
+│  │ (coalesces  │      │  (local replica =    │ │
+│  │  requests)  │      │   in-memory cache)   │ │
+│  └─────────────┘      └──────────────────────┘ │
+└─────────────────────────────────────────────────┘
+```
+
+Actor processes one message at a time = natural coalescing.
+No Caffeine, no Disruptor, no AtomicReference tricks.
+
+---
+
+## Actors vs Streams
+
+| Aspect | Typed Actors | Pekko Streams |
+|--------|--------------|---------------|
+| State | Natural (actor encapsulates) | Awkward (statefulMapConcat) |
+| Request-Response | Natural (ask pattern) | Awkward |
+| Distribution | Easy (remote actors) | Hard (streams are local) |
+
+**Decision:** Actors for stateful coordination (TubeStatusReplicator), Streams where already used (Pekko HTTP).
+
+---
+
+## Circuit Breaker
 
 ```
 Client ──► CRDT Cache ──► Response (always works)
@@ -117,65 +173,49 @@ Client ──► CRDT Cache ──► Response (always works)
          Refresher ──► Circuit Breaker ──► TfL API
 ```
 
-Circuit states:
-- **CLOSED**: Normal operation, refresh every 30s
-- **OPEN**: Stop hammering TfL, serve cached data, wait 30s
-- **HALF_OPEN**: Try one request, if success → CLOSED, if fail → OPEN
+| State | Behavior |
+|-------|----------|
+| CLOSED | Normal operation |
+| OPEN | Stop calling TfL, serve cached, wait 30s |
+| HALF_OPEN | Try one request, close on success |
 
-### Configuration
-
-| Parameter | Value | Rationale |
-|-----------|-------|-----------|
-| Failure threshold | 5 | Filters transient blips, catches real outages |
-| Recovery timeout | 30s | Matches TfL's typical recovery time |
+Config: 5 failures → OPEN, 30s recovery.
 
 ---
 
 ## Retry Policy
 
-### Exponential Backoff with Jitter
-
 ```
 Attempt 1: immediate
-Attempt 2: 1s ± 250ms
-Attempt 3: 2s ± 500ms
-Attempt 4: 4s ± 1s
+Attempt 2: 1s ± jitter
+Attempt 3: 2s ± jitter
+Attempt 4: 4s ± jitter (capped at 30s)
 ```
 
-Total worst case: ~7s
-
-### What We Retry
-
-| Response | Retry? | Rationale |
-|----------|--------|-----------|
-| 5xx | Yes | Server error, might recover |
-| 429 | Yes | Rate limited, backoff helps |
-| Timeout | Yes | Network blip |
-| 4xx (except 429) | No | Client error, won't fix itself |
+| Response | Retry? |
+|----------|--------|
+| 5xx | Yes |
+| 429 | Yes |
+| 4xx | No |
 
 ---
 
 ## Rate Limiting
 
-### Token Bucket per Client
-
-- Bucket size: 100 tokens
-- Refill rate: 100/minute
-- Exceed → 429 with `Retry-After` header
+Token bucket per client IP:
+- 100 tokens/minute
+- Exceed → 429 with Retry-After header
 
 ---
 
-## CRDT Replication
+## Future Enhancement: Explicit Stale Serving
 
-Using Pekko Distributed Data with LWW-Register:
-- Each node can poll TfL independently
-- CRDT replication naturally shares data
-- LWW ensures freshest data wins
-- No leader election needed (simpler, more available)
+Currently: always serve with ageMs, client decides.
 
+Future option:
 ```
-Node-1 ──► TfL ──► LWW-Register ◄──► LWW-Register ◄── Node-2 ──► TfL
-                        │                   │
-                        └───────────────────┘
-                          (gossip replication)
+GET /api/v1/tube/status?maxAgeMs=300000  → 503 if older than 5 min
+GET /api/v1/tube/status?allowStale=true  → Returns with warning
 ```
+
+Not implemented: returning invented/estimated data is dangerous without explicit request.

@@ -11,7 +11,6 @@ import org.junit.jupiter.api.*;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.time.LocalDate;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -230,22 +229,6 @@ class TubeStatusReplicatorTest {
                     Instant.now(),
                     stubStatus.queriedBy()
             ));
-        }
-
-        @Override
-        public CompletionStage<TubeStatus> fetchLineAsync(String lineId) {
-            return fetchAllLinesAsync();
-        }
-
-        @Override
-        public CompletionStage<TubeStatus> fetchLineWithDateRangeAsync(
-                String lineId, LocalDate startDate, LocalDate endDate) {
-            return fetchAllLinesAsync();
-        }
-
-        @Override
-        public CompletionStage<TubeStatus> fetchUnplannedDisruptionsAsync() {
-            return fetchAllLinesAsync();
         }
 
         @Override

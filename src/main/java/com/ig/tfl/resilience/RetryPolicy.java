@@ -3,7 +3,6 @@ package com.ig.tfl.resilience;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.Random;
 import java.util.concurrent.CompletableFuture;
@@ -30,7 +29,6 @@ public class RetryPolicy {
     private final Duration maxDelay;
     private final double jitterFactor;  // 0.25 = ±25%
     private final Predicate<Throwable> retryableException;
-    private final Predicate<HttpResponse<?>> retryableResponse;
     private final Random random = new Random();
 
     private RetryPolicy(Builder builder) {
@@ -39,7 +37,6 @@ public class RetryPolicy {
         this.maxDelay = builder.maxDelay;
         this.jitterFactor = builder.jitterFactor;
         this.retryableException = builder.retryableException;
-        this.retryableResponse = builder.retryableResponse;
     }
 
     public static Builder builder() {
@@ -57,7 +54,6 @@ public class RetryPolicy {
                 .maxDelay(Duration.ofSeconds(30))
                 .jitterFactor(0.25)
                 .retryOnException(RetryPolicy::isRetryableException)
-                .retryOnResponse(RetryPolicy::isRetryableResponse)
                 .build();
     }
 
@@ -163,10 +159,6 @@ public class RetryPolicy {
         return false;
     }
 
-    private static boolean isRetryableResponse(HttpResponse<?> response) {
-        return isRetryableStatus(response.statusCode());
-    }
-
     private static boolean isRetryableStatus(int status) {
         // Retry on 5xx server errors
         if (status >= 500) return true;
@@ -201,7 +193,6 @@ public class RetryPolicy {
         private Duration maxDelay = Duration.ofSeconds(30);
         private double jitterFactor = 0.25;
         private Predicate<Throwable> retryableException = t -> true;
-        private Predicate<HttpResponse<?>> retryableResponse = r -> false;
 
         public Builder maxRetries(int maxRetries) {
             this.maxRetries = maxRetries;
@@ -225,11 +216,6 @@ public class RetryPolicy {
 
         public Builder retryOnException(Predicate<Throwable> predicate) {
             this.retryableException = predicate;
-            return this;
-        }
-
-        public Builder retryOnResponse(Predicate<HttpResponse<?>> predicate) {
-            this.retryableResponse = predicate;
             return this;
         }
 

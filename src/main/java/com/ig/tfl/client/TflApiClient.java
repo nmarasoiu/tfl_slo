@@ -19,8 +19,6 @@ import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.time.LocalDate;
-import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -34,7 +32,7 @@ public class TflApiClient implements TflClient {
     private static final Logger log = LoggerFactory.getLogger(TflApiClient.class);
 
     private static final String DEFAULT_TFL_BASE_URL = "https://api.tfl.gov.uk";
-    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(10);
+    private static final long RESPONSE_TIMEOUT_MS = 10_000;
 
     private final ActorSystem<?> system;
     private final Http http;
@@ -69,42 +67,6 @@ public class TflApiClient implements TflClient {
                 executeWithCircuitBreaker(() -> doFetchAllLines()));
     }
 
-    /**
-     * Fetch status for a specific line (async).
-     */
-    public CompletionStage<TubeStatus> fetchLineAsync(String lineId) {
-        return retryPolicy.executeAsync(() ->
-                executeWithCircuitBreaker(() -> doFetchLine(lineId)));
-    }
-
-    /**
-     * Fetch status for a specific line with date range (async).
-     */
-    public CompletionStage<TubeStatus> fetchLineWithDateRangeAsync(
-            String lineId, LocalDate startDate, LocalDate endDate) {
-        return retryPolicy.executeAsync(() ->
-                executeWithCircuitBreaker(() -> doFetchLineWithDateRange(lineId, startDate, endDate)));
-    }
-
-    /**
-     * Fetch all lines with unplanned disruptions (async).
-     */
-    public CompletionStage<TubeStatus> fetchUnplannedDisruptionsAsync() {
-        return fetchAllLinesAsync().thenApply(all -> {
-            List<LineStatus> disrupted = all.lines().stream()
-                    .filter(this::hasUnplannedDisruption)
-                    .toList();
-            return new TubeStatus(disrupted, all.queriedAt(), all.queriedBy());
-        });
-    }
-
-    private boolean hasUnplannedDisruption(LineStatus line) {
-        if (line.disruptions() == null || line.disruptions().isEmpty()) {
-            return false;
-        }
-        return line.disruptions().stream().anyMatch(d -> !d.isPlanned());
-    }
-
     // Circuit breaker wrapper
     private CompletableFuture<TubeStatus> executeWithCircuitBreaker(
             java.util.function.Supplier<CompletionStage<TubeStatus>> operation) {
@@ -130,22 +92,6 @@ public class TflApiClient implements TflClient {
 
     private CompletionStage<TubeStatus> doFetchAllLines() {
         String url = baseUrl + "/Line/Mode/tube/Status";
-        return fetchAndParse(url, new TypeReference<List<TflLineResponse>>() {})
-                .thenApply(this::toTubeStatus);
-    }
-
-    private CompletionStage<TubeStatus> doFetchLine(String lineId) {
-        String url = baseUrl + "/Line/" + lineId + "/Status";
-        return fetchAndParse(url, new TypeReference<List<TflLineResponse>>() {})
-                .thenApply(this::toTubeStatus);
-    }
-
-    private CompletionStage<TubeStatus> doFetchLineWithDateRange(
-            String lineId, LocalDate startDate, LocalDate endDate) {
-        String url = String.format("%s/Line/%s/Status/%s/to/%s",
-                baseUrl, lineId,
-                startDate.format(DateTimeFormatter.ISO_LOCAL_DATE),
-                endDate.format(DateTimeFormatter.ISO_LOCAL_DATE));
         return fetchAndParse(url, new TypeReference<List<TflLineResponse>>() {})
                 .thenApply(this::toTubeStatus);
     }
@@ -180,7 +126,7 @@ public class TflApiClient implements TflClient {
 
         // Collect response body
         return response.entity()
-                .toStrict(REQUEST_TIMEOUT.toMillis(), materializer)
+                .toStrict(RESPONSE_TIMEOUT_MS, materializer)
                 .thenApply(entity -> {
                     try {
                         String body = entity.getData().utf8String();

@@ -145,20 +145,6 @@ class TflApiClientIntegrationTest {
     }
 
     @Test
-    void doesNotRetryOn404() {
-        wireMock.stubFor(get(urlPathEqualTo("/Line/invalid/Status"))
-                .willReturn(notFound()));
-
-        assertThatThrownBy(() ->
-                client.fetchLineAsync("invalid").toCompletableFuture().join())
-                .isInstanceOf(CompletionException.class)
-                .hasCauseInstanceOf(RetryPolicy.HttpStatusException.class);
-
-        // Should NOT retry on 4xx
-        wireMock.verify(1, getRequestedFor(urlPathEqualTo("/Line/invalid/Status")));
-    }
-
-    @Test
     void circuitOpensAfterRepeatedFailures() {
         wireMock.stubFor(get(urlPathEqualTo("/Line/Mode/tube/Status"))
                 .willReturn(serverError()));
@@ -215,46 +201,6 @@ class TflApiClientIntegrationTest {
                         .toCompletableFuture()
                         .get(15, TimeUnit.SECONDS))
                 .isInstanceOf(Exception.class);
-    }
-
-    @Test
-    void fetchesSpecificLine() {
-        String singleLineResponse = """
-                [{
-                    "id": "victoria",
-                    "name": "Victoria",
-                    "lineStatuses": [{
-                        "statusSeverity": 10,
-                        "statusSeverityDescription": "Good Service",
-                        "disruption": null
-                    }]
-                }]
-                """;
-
-        wireMock.stubFor(get(urlPathEqualTo("/Line/victoria/Status"))
-                .willReturn(okJson(singleLineResponse)));
-
-        TubeStatus status = client.fetchLineAsync("victoria")
-                .toCompletableFuture()
-                .join();
-
-        assertThat(status.lines()).hasSize(1);
-        assertThat(status.lines().get(0).id()).isEqualTo("victoria");
-        assertThat(status.lines().get(0).status()).isEqualTo("Good Service");
-    }
-
-    @Test
-    void fetchesUnplannedDisruptionsOnly() {
-        wireMock.stubFor(get(urlPathEqualTo("/Line/Mode/tube/Status"))
-                .willReturn(okJson(sampleResponse)));
-
-        TubeStatus status = client.fetchUnplannedDisruptionsAsync()
-                .toCompletableFuture()
-                .join();
-
-        // Only District has unplanned disruption (Piccadilly is planned)
-        assertThat(status.lines()).hasSize(1);
-        assertThat(status.lines().get(0).id()).isEqualTo("district");
     }
 
 }

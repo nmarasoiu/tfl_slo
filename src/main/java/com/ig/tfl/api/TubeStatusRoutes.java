@@ -2,17 +2,16 @@ package com.ig.tfl.api;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
-import com.ig.tfl.client.TflApiClient;
 import com.ig.tfl.crdt.TubeStatusReplicator;
 import com.ig.tfl.crdt.TubeStatusReplicator.GetStatus;
 import com.ig.tfl.crdt.TubeStatusReplicator.StatusResponse;
 import com.ig.tfl.model.TubeStatus;
+import com.ig.tfl.resilience.CircuitBreaker;
 import com.ig.tfl.resilience.RateLimiter;
 import org.apache.pekko.actor.typed.ActorRef;
 import org.apache.pekko.actor.typed.ActorSystem;
 import org.apache.pekko.actor.typed.javadsl.AskPattern;
 import org.apache.pekko.http.javadsl.marshallers.jackson.Jackson;
-import org.apache.pekko.http.javadsl.model.HttpResponse;
 import org.apache.pekko.http.javadsl.model.StatusCodes;
 import org.apache.pekko.http.javadsl.model.headers.RawHeader;
 import org.apache.pekko.http.javadsl.server.AllDirectives;
@@ -23,34 +22,32 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
-import java.time.LocalDate;
-import java.time.format.DateTimeFormatter;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.CompletionStage;
-
-import static org.apache.pekko.http.javadsl.server.PathMatchers.*;
+import java.util.function.Supplier;
 
 /**
  * HTTP routes for tube status API.
+ *
+ * All queries go through CRDT for consistent caching.
  */
 public class TubeStatusRoutes extends AllDirectives {
     private static final Logger log = LoggerFactory.getLogger(TubeStatusRoutes.class);
 
     private final ActorSystem<?> system;
     private final ActorRef<TubeStatusReplicator.Command> replicator;
-    private final TflApiClient tflClient;
     private final RateLimiter rateLimiter;
     private final ObjectMapper objectMapper;
+    private final Supplier<CircuitBreaker.State> circuitStateSupplier;
     private final Duration askTimeout = Duration.ofSeconds(5);
 
     public TubeStatusRoutes(
             ActorSystem<?> system,
             ActorRef<TubeStatusReplicator.Command> replicator,
-            TflApiClient tflClient) {
+            Supplier<CircuitBreaker.State> circuitStateSupplier) {
         this.system = system;
         this.replicator = replicator;
-        this.tflClient = tflClient;
+        this.circuitStateSupplier = circuitStateSupplier;
         this.rateLimiter = RateLimiter.perMinute(100);
         this.objectMapper = new ObjectMapper()
                 .registerModule(new JavaTimeModule());
@@ -80,27 +77,13 @@ public class TubeStatusRoutes extends AllDirectives {
         return pathPrefix("v1", () ->
                 pathPrefix("tube", () ->
                         concat(
-                                // GET /api/v1/tube/status - all lines
+                                // GET /api/v1/tube/status - all lines (from CRDT)
                                 path("status", () ->
-                                        get(() -> getAllStatus())
+                                        get(this::getAllStatus)
                                 ),
-                                // GET /api/v1/tube/disruptions - unplanned only
+                                // GET /api/v1/tube/disruptions - filter from CRDT
                                 path("disruptions", () ->
-                                        get(() -> getUnplannedDisruptions())
-                                ),
-                                // GET /api/v1/tube/{lineId}/status - specific line
-                                pathPrefix(segment(), lineId ->
-                                        concat(
-                                                path("status", () ->
-                                                        get(() -> getLineStatus(lineId))
-                                                ),
-                                                // GET /api/v1/tube/{lineId}/status/{from}/to/{to}
-                                                pathPrefix("status", () ->
-                                                        path(segment().slash("to").slash(segment()), (from, to) ->
-                                                                get(() -> getLineStatusWithRange(lineId, from, to))
-                                                        )
-                                                )
-                                        )
+                                        get(this::getDisruptions)
                                 )
                         )
                 )
@@ -115,8 +98,8 @@ public class TubeStatusRoutes extends AllDirectives {
                         ),
                         path("ready", () ->
                                 get(() -> {
-                                    var circuitState = tflClient.getCircuitState();
-                                    if (circuitState == com.ig.tfl.resilience.CircuitBreaker.State.OPEN) {
+                                    var circuitState = circuitStateSupplier.get();
+                                    if (circuitState == CircuitBreaker.State.OPEN) {
                                         return complete(StatusCodes.SERVICE_UNAVAILABLE,
                                                 Map.of("status", "degraded", "circuit", "OPEN"),
                                                 Jackson.marshaller(objectMapper));
@@ -149,37 +132,34 @@ public class TubeStatusRoutes extends AllDirectives {
         });
     }
 
-    private Route getLineStatus(String lineId) {
-        return onSuccess(tflClient.fetchLineAsync(lineId), status ->
-                complete(StatusCodes.OK,
-                        toApiResponse(status),
-                        Jackson.marshaller(objectMapper)));
+    private Route getDisruptions() {
+        CompletionStage<StatusResponse> future = AskPattern.ask(
+                replicator,
+                GetStatus::new,
+                askTimeout,
+                system.scheduler());
+
+        return onSuccess(future, response -> {
+            if (response.status() == null) {
+                return complete(StatusCodes.SERVICE_UNAVAILABLE,
+                        Map.of("error", "No data available"),
+                        Jackson.marshaller(objectMapper));
+            }
+            // Filter to only lines with unplanned disruptions
+            var disrupted = response.status().lines().stream()
+                    .filter(line -> line.disruptions() != null &&
+                            line.disruptions().stream().anyMatch(d -> !d.isPlanned()))
+                    .toList();
+            var filtered = new TubeStatus(disrupted,
+                    response.status().queriedAt(),
+                    response.status().queriedBy());
+            return complete(StatusCodes.OK,
+                    toApiResponse(filtered),
+                    Jackson.marshaller(objectMapper));
+        });
     }
 
-    private Route getLineStatusWithRange(String lineId, String from, String to) {
-        LocalDate fromDate = LocalDate.parse(from, DateTimeFormatter.ISO_LOCAL_DATE);
-        LocalDate toDate = LocalDate.parse(to, DateTimeFormatter.ISO_LOCAL_DATE);
-        return onSuccess(tflClient.fetchLineWithDateRangeAsync(lineId, fromDate, toDate), status ->
-                complete(StatusCodes.OK,
-                        toApiResponse(status),
-                        Jackson.marshaller(objectMapper)));
-    }
-
-    private Route getUnplannedDisruptions() {
-        return onSuccess(tflClient.fetchUnplannedDisruptionsAsync(), status ->
-                complete(StatusCodes.OK,
-                        toApiResponse(status),
-                        Jackson.marshaller(objectMapper)));
-    }
-
-    private Route handleTflError(Exception e) {
-        log.error("TfL API error: {}", e.getMessage());
-        return complete(StatusCodes.BAD_GATEWAY,
-                Map.of("error", "Upstream service unavailable", "message", e.getMessage()),
-                Jackson.marshaller(objectMapper));
-    }
-
-    private Route rateLimitCheck(String clientIp, java.util.function.Supplier<Route> inner) {
+    private Route rateLimitCheck(String clientIp, Supplier<Route> inner) {
         var result = rateLimiter.tryAcquire(clientIp);
         if (!result.allowed()) {
             return respondWithHeader(
@@ -228,15 +208,14 @@ public class TubeStatusRoutes extends AllDirectives {
         return RejectionHandler.defaultHandler();
     }
 
-    // API response wrapper
     public record ApiResponse(
             java.util.List<TubeStatus.LineStatus> lines,
             Meta meta
     ) {
         public record Meta(
-                java.time.Instant queriedAt,  // When TfL was queried (immutable)
-                String queriedBy,             // Which node queried
-                long ageMs                    // How old this data is
+                java.time.Instant queriedAt,
+                String queriedBy,
+                long ageMs
         ) {}
     }
 }
