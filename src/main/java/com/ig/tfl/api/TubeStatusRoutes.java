@@ -22,12 +22,15 @@ import org.apache.pekko.http.javadsl.server.RejectionHandler;
 import org.apache.pekko.http.javadsl.server.Route;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import scala.util.Try;
 
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.function.Supplier;
 
@@ -85,9 +88,18 @@ public class TubeStatusRoutes extends AllDirectives {
         return pathPrefix("v1", () ->
                 pathPrefix("tube", () ->
                         concat(
-                                // GET /api/v1/tube/status - all lines (from CRDT)
+                                // GET /api/v1/tube/status?maxAgeMs=60000 - all lines with freshness requirement
                                 path("status", () ->
-                                        get(this::getAllStatus)
+                                        get(() -> parameterOptional("maxAgeMs", maxAgeStr -> {
+                                            Optional<Long> maxAgeMs = maxAgeStr.map(s -> {
+                                                try {
+                                                    return Long.parseLong(s);
+                                                } catch (NumberFormatException e) {
+                                                    return null;
+                                                }
+                                            });
+                                            return getAllStatus(maxAgeMs.orElse(null));
+                                        }))
                                 ),
                                 // GET /api/v1/tube/disruptions - filter from CRDT
                                 path("disruptions", () ->
@@ -159,22 +171,61 @@ public class TubeStatusRoutes extends AllDirectives {
         );
     }
 
-    private Route getAllStatus() {
-        CompletionStage<StatusResponse> future = AskPattern.ask(
+    private Route getAllStatus(Long maxAgeMs) {
+        CompletionStage<StatusResponse> cacheFuture = AskPattern.ask(
                 replicator,
                 GetStatus::new,
                 askTimeout,
                 system.scheduler());
 
-        return onSuccess(future, response -> {
-            if (response.status() == null) {
+        return onSuccess(cacheFuture, cacheResponse -> {
+            TubeStatus cached = cacheResponse.status();
+
+            // No data at all
+            if (cached == null) {
                 return complete(StatusCodes.SERVICE_UNAVAILABLE,
                         Map.of("error", "No data available"),
                         Jackson.marshaller(objectMapper));
             }
-            return complete(StatusCodes.OK,
-                    toApiResponse(response.status()),
-                    Jackson.marshaller(objectMapper));
+
+            // No freshness requirement or cache is fresh enough
+            if (maxAgeMs == null || cached.ageMs() <= maxAgeMs) {
+                return complete(StatusCodes.OK,
+                        toApiResponse(cached),
+                        Jackson.marshaller(objectMapper));
+            }
+
+            // Cache too stale - try to fetch fresh from TfL
+            log.info("Cache is {}ms old, client wants max {}ms - attempting TfL fetch",
+                    cached.ageMs(), maxAgeMs);
+
+            CompletionStage<TubeStatus> tflFuture = tflClient.fetchAllLinesAsync();
+
+            return onComplete(tflFuture, tryResult -> {
+                if (tryResult.isSuccess() && tryResult.get() != null) {
+                    // Got fresh data from TfL
+                    TubeStatus fresh = tryResult.get();
+                    return complete(StatusCodes.OK,
+                            toApiResponse(fresh),
+                            Jackson.marshaller(objectMapper));
+                } else {
+                    // TfL failed - return stale with warning header
+                    log.warn("TfL fetch failed, returning stale data: {}",
+                            tryResult.isFailure() ? tryResult.failed().get().getMessage() : "null response");
+                    return respondWithHeader(
+                            RawHeader.create("X-Data-Stale", "true"),
+                            () -> respondWithHeader(
+                                    RawHeader.create("X-Requested-Max-Age-Ms", String.valueOf(maxAgeMs)),
+                                    () -> respondWithHeader(
+                                            RawHeader.create("X-Actual-Age-Ms", String.valueOf(cached.ageMs())),
+                                            () -> complete(StatusCodes.OK,
+                                                    toApiResponse(cached),
+                                                    Jackson.marshaller(objectMapper))
+                                    )
+                            )
+                    );
+                }
+            });
         });
     }
 

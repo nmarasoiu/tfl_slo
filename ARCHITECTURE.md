@@ -110,23 +110,32 @@ Client Request
 ## Query Tiers
 
 ```
-Request
+Request with ?maxAgeMs=60000
    │
    ▼
-Tier 0: Local CRDT replica ──── FRESH ────► Response
+Tier 0: Local CRDT replica ──── FRESH ENOUGH ────► Response
    │
-   │ STALE
+   │ TOO STALE
    ▼
-Tier 1: Peer scatter-gather ──── PEER FRESH ────► Response
+Tier 1: TfL API ──── SUCCESS ────► Response + update CRDT
    │
-   │ ALL STALE
+   │ FAILURE (circuit open, timeout, etc.)
    ▼
-Tier N: TfL API ──── SUCCESS ────► Response + update CRDT
-   │
-   │ FAILURE
-   ▼
-Fallback: Return stale with ageMs
+Fallback: Return stale with ageMs + X-Data-Stale header
 ```
+
+**Currently implemented:** Tier 0 (local) → Tier 1 (TfL) → Fallback
+
+**Future enhancement:** Add explicit peer scatter-gather between Tier 0 and TfL:
+```
+Tier 0: Local CRDT replica (readLocal)
+Tier 1: Cluster majority (ReadMajority) ← not yet implemented
+Tier 2: Cluster all (ReadAll) ← not yet implemented
+Tier 3: TfL API
+```
+
+The CRDT gossip propagates data between nodes in the background, but explicit
+scatter-gather queries to peers would reduce TfL calls further.
 
 **Local replica IS the cache. No separate Caffeine layer needed.**
 

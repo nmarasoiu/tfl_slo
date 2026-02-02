@@ -207,6 +207,41 @@ class TubeStatusRoutesTest {
     }
 
     @Test
+    void getAllStatus_withMaxAgeMsParam_returnsCachedIfFresh() throws Exception {
+        // Request with very high maxAgeMs - cache should be fresh enough
+        HttpResponse response = get("/api/v1/tube/status?maxAgeMs=3600000");
+        assertThat(response.status().intValue()).isEqualTo(200);
+
+        String body = getBody(response);
+        JsonNode json = objectMapper.readTree(body);
+        assertThat(json.get("lines").size()).isEqualTo(3);
+        // No stale header since cache is fresh enough
+        assertThat(response.getHeader("X-Data-Stale")).isEmpty();
+    }
+
+    @Test
+    void getAllStatus_withMaxAgeMsParam_attemptsRefreshIfStale() throws Exception {
+        // Request with maxAgeMs=0 - cache is always "too stale", triggers TfL fetch
+        // Our stub TfL client returns fresh data, so this should succeed
+        HttpResponse response = get("/api/v1/tube/status?maxAgeMs=0");
+        assertThat(response.status().intValue()).isEqualTo(200);
+
+        String body = getBody(response);
+        JsonNode json = objectMapper.readTree(body);
+        assertThat(json.has("lines")).isTrue();
+    }
+
+    @Test
+    void getAllStatus_withoutMaxAgeMs_returnsWhateverWeHave() throws Exception {
+        HttpResponse response = get("/api/v1/tube/status");
+        assertThat(response.status().intValue()).isEqualTo(200);
+
+        String body = getBody(response);
+        JsonNode json = objectMapper.readTree(body);
+        assertThat(json.get("lines").size()).isEqualTo(3);
+    }
+
+    @Test
     void healthLive_returnsOk() throws Exception {
         HttpResponse response = get("/api/health/live");
         assertThat(response.status().intValue()).isEqualTo(200);

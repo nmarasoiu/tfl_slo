@@ -18,22 +18,41 @@ TFL_HTTP_PORT=8081 TFL_NODE_ID=node-2 ./gradlew run
 ## API Endpoints
 
 ```bash
-# Get all tube line statuses
+# Get all tube line statuses (returns cached data)
 curl http://localhost:8080/api/v1/tube/status
 
-# Get specific line status
+# Get all statuses with freshness requirement (max 60 seconds old)
+# If cache is staler, attempts TfL fetch; falls back to stale with headers
+curl http://localhost:8080/api/v1/tube/status?maxAgeMs=60000
+
+# Get specific line status (filtered from cache)
 curl http://localhost:8080/api/v1/tube/central/status
 
-# Get status with date range
+# Get status with date range (queries TfL directly for future/planned data)
 curl http://localhost:8080/api/v1/tube/northern/status/2026-02-10/to/2026-02-12
 
-# Get unplanned disruptions only
+# Get unplanned disruptions only (filtered from cache)
 curl http://localhost:8080/api/v1/tube/disruptions
 
 # Health checks
-curl http://localhost:8080/api/health/live
-curl http://localhost:8080/api/health/ready
+curl http://localhost:8080/api/health/live   # Always 200 if process alive
+curl http://localhost:8080/api/health/ready  # 200 if has cached data, 503 if warming up
 ```
+
+### Freshness Parameter
+
+The `maxAgeMs` query parameter lets clients specify how fresh they need the data:
+
+| Request | Behavior |
+|---------|----------|
+| `/status` | Return cached data (any age) |
+| `/status?maxAgeMs=60000` | Return if ≤60s old, else try TfL, else return stale with `X-Data-Stale: true` |
+| `/status?maxAgeMs=0` | Always attempt TfL fetch (still returns stale on failure) |
+
+When returning stale data that doesn't meet the freshness requirement:
+- `X-Data-Stale: true` - indicates data is staler than requested
+- `X-Requested-Max-Age-Ms` - what the client asked for
+- `X-Actual-Age-Ms` - how old the data actually is
 
 ## Response Format
 
