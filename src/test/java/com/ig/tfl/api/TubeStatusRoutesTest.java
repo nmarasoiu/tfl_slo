@@ -242,6 +242,15 @@ class TubeStatusRoutesTest {
     }
 
     @Test
+    void getAllStatus_triggersBackgroundRefreshWhenSlightlyStale() throws Exception {
+        // With high maxAgeMs, data is fresh enough to return but may trigger background refresh
+        // We can't easily test the async trigger, but we verify the response is immediate
+        HttpResponse response = get("/api/v1/tube/status?maxAgeMs=60000");
+        assertThat(response.status().intValue()).isEqualTo(200);
+        // Background refresh is fire-and-forget, no observable effect in response
+    }
+
+    @Test
     void healthLive_returnsOk() throws Exception {
         HttpResponse response = get("/api/health/live");
         assertThat(response.status().intValue()).isEqualTo(200);

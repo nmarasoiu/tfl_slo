@@ -50,6 +50,7 @@ public class TubeStatusReplicator extends AbstractBehavior<TubeStatusReplicator.
 
     public record RefreshTick() implements Command {}
     public record GetStatus(ActorRef<StatusResponse> replyTo) implements Command {}
+    public record TriggerBackgroundRefresh() implements Command {}  // Fire-and-forget refresh
     public record StatusResponse(TubeStatus status) {}
 
     // Internal messages
@@ -112,10 +113,17 @@ public class TubeStatusReplicator extends AbstractBehavior<TubeStatusReplicator.
         return newReceiveBuilder()
                 .onMessage(RefreshTick.class, this::onRefreshTick)
                 .onMessage(GetStatus.class, this::onGetStatus)
+                .onMessage(TriggerBackgroundRefresh.class, this::onTriggerBackgroundRefresh)
                 .onMessage(InternalGetResponse.class, this::onInternalGetResponse)
                 .onMessage(InternalUpdateResponse.class, this::onInternalUpdateResponse)
                 .onMessage(TflFetchComplete.class, this::onTflFetchComplete)
                 .build();
+    }
+
+    private Behavior<Command> onTriggerBackgroundRefresh(TriggerBackgroundRefresh msg) {
+        log.debug("Background refresh triggered by HTTP layer");
+        fetchFromTfl();
+        return this;
     }
 
     private Behavior<Command> onRefreshTick(RefreshTick msg) {

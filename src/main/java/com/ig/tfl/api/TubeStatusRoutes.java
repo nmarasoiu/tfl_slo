@@ -6,6 +6,7 @@ import com.ig.tfl.client.TflClient;
 import com.ig.tfl.crdt.TubeStatusReplicator;
 import com.ig.tfl.crdt.TubeStatusReplicator.GetStatus;
 import com.ig.tfl.crdt.TubeStatusReplicator.StatusResponse;
+import com.ig.tfl.crdt.TubeStatusReplicator.TriggerBackgroundRefresh;
 import com.ig.tfl.model.TubeStatus;
 import com.ig.tfl.resilience.CircuitBreaker;
 import com.ig.tfl.resilience.RateLimiter;
@@ -49,6 +50,10 @@ public class TubeStatusRoutes extends AllDirectives {
     private final ObjectMapper objectMapper;
     private final Supplier<CircuitBreaker.State> circuitStateSupplier;
     private final Duration askTimeout = Duration.ofSeconds(5);
+
+    // Soft threshold: if data older than this, trigger background refresh even if fresh enough to return
+    // This keeps the cache warm proactively
+    private static final long BACKGROUND_REFRESH_THRESHOLD_MS = 5_000;  // 5 seconds
 
     public TubeStatusRoutes(
             ActorSystem<?> system,
@@ -190,6 +195,12 @@ public class TubeStatusRoutes extends AllDirectives {
 
             // No freshness requirement or cache is fresh enough
             if (maxAgeMs == null || cached.ageMs() <= maxAgeMs) {
+                // Check soft threshold: trigger background refresh if getting stale
+                if (cached.ageMs() > BACKGROUND_REFRESH_THRESHOLD_MS) {
+                    log.debug("Data is {}ms old (> {}ms soft threshold) - triggering background refresh",
+                            cached.ageMs(), BACKGROUND_REFRESH_THRESHOLD_MS);
+                    replicator.tell(new TriggerBackgroundRefresh());
+                }
                 return complete(StatusCodes.OK,
                         toApiResponse(cached),
                         Jackson.marshaller(objectMapper));

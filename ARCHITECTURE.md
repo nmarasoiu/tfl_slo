@@ -142,6 +142,70 @@ Fallback: Return stale with ageMs + X-Data-Stale header
 
 **Currently implemented:** Tier 0 (local) → Tier 1 (TfL) → Fallback
 
+### Tiered Freshness Strategy
+
+```
+Client request with maxAgeMs=250
+            │
+            ▼
+    Local cache age?
+            │
+    ┌───────┴───────┬─────────────────┐
+    │               │                 │
+  ≤5s             5-250ms           >250ms
+(very fresh)   (slightly stale)   (too stale)
+    │               │                 │
+    ▼               ▼                 ▼
+  Return        Return +           Wait for
+immediately   trigger async       TfL fetch
+              background
+              refresh
+```
+
+| Cache Age | Action | Response |
+|-----------|--------|----------|
+| ≤ soft threshold (5s) | Return | Immediate |
+| > soft threshold, ≤ maxAgeMs | Return + async refresh | Immediate |
+| > maxAgeMs | Fetch from TfL | After fetch |
+
+The soft threshold (5s) keeps the cache warm proactively. Clients get instant
+responses while the cache refreshes in the background.
+
+### Future Enhancement: Racing TfL vs CRDT
+
+When cache is too stale and we must fetch from TfL, we currently wait only for TfL.
+An optimization: **race TfL fetch against CRDT updates**.
+
+```
+Cache too stale (>maxAgeMs)
+            │
+            ├──► Start TfL fetch
+            │
+            └──► Subscribe to CRDT updates
+                        │
+            ┌───────────┴───────────┐
+            ▼                       ▼
+    TfL responds             CRDT delivers fresh
+    (our fetch)              data from peer
+            │                       │
+            └───────┬───────────────┘
+                    ▼
+            Return whichever
+            arrives first with
+            fresh enough data
+```
+
+**Why this helps:** Another node may have already fetched from TfL. Their data
+propagates via CRDT gossip (~200ms). If their data arrives before our TfL
+response, we can use it and cancel our fetch.
+
+**Complexity:** Requires CRDT subscription + CompletableFuture racing + cancellation.
+Adds ~50 lines of code. ROI questionable for POC - the optimization saves
+~100-300ms in rare cases where another node is slightly ahead.
+
+**Verdict:** Document, don't implement. The current approach (just wait for TfL)
+is simple and correct. The racing is a micro-optimization.
+
 **Future enhancement:** Add explicit peer scatter-gather between Tier 0 and TfL:
 ```
 Tier 0: Local CRDT replica (readLocal)
