@@ -1,1 +1,14 @@
-private
+# Private/confidential
+private/
+
+# Build
+build/
+.gradle/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
