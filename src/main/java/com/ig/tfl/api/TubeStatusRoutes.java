@@ -121,15 +121,38 @@ public class TubeStatusRoutes extends AllDirectives {
                         ),
                         path("ready", () ->
                                 get(() -> {
-                                    var circuitState = circuitStateSupplier.get();
-                                    if (circuitState == CircuitBreaker.State.OPEN) {
-                                        return complete(StatusCodes.SERVICE_UNAVAILABLE,
-                                                Map.of("status", "degraded", "circuit", "OPEN"),
+                                    // Ready = we have data to serve (even if stale)
+                                    // Circuit state is informational, not a readiness gate
+                                    CompletionStage<StatusResponse> future = AskPattern.ask(
+                                            replicator,
+                                            GetStatus::new,
+                                            askTimeout,
+                                            system.scheduler());
+
+                                    return onSuccess(future, response -> {
+                                        var circuitState = circuitStateSupplier.get();
+                                        boolean hasData = response.status() != null;
+
+                                        if (!hasData) {
+                                            // Cold start - no data yet
+                                            return complete(StatusCodes.SERVICE_UNAVAILABLE,
+                                                    Map.of(
+                                                            "status", "warming_up",
+                                                            "reason", "No cached data yet",
+                                                            "circuit", circuitState.name()
+                                                    ),
+                                                    Jackson.marshaller(objectMapper));
+                                        }
+
+                                        // Ready - we have data (stale or fresh, doesn't matter)
+                                        return complete(StatusCodes.OK,
+                                                Map.of(
+                                                        "status", "ready",
+                                                        "circuit", circuitState.name(),
+                                                        "dataAgeMs", response.status().ageMs()
+                                                ),
                                                 Jackson.marshaller(objectMapper));
-                                    }
-                                    return complete(StatusCodes.OK,
-                                            Map.of("status", "ready", "circuit", circuitState.name()),
-                                            Jackson.marshaller(objectMapper));
+                                    });
                                 })
                         )
                 )

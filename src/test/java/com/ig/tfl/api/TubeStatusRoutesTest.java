@@ -213,12 +213,15 @@ class TubeStatusRoutesTest {
     }
 
     @Test
-    void healthReady_returnsOk() throws Exception {
+    void healthReady_returnsOkWhenDataAvailable() throws Exception {
         HttpResponse response = get("/api/health/ready");
         assertThat(response.status().intValue()).isEqualTo(200);
 
         String body = getBody(response);
-        assertThat(body).contains("ready");
+        JsonNode json = objectMapper.readTree(body);
+        assertThat(json.get("status").asText()).isEqualTo("ready");
+        assertThat(json.has("dataAgeMs")).isTrue();
+        assertThat(json.has("circuit")).isTrue();
     }
 
     private HttpResponse get(String path) throws Exception {
