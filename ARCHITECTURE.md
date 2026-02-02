@@ -155,6 +155,33 @@ scatter-gather queries to peers would reduce TfL calls further.
 
 **Local replica IS the cache. No separate Caffeine layer needed.**
 
+### Multi-Datacenter (Production)
+
+Pekko supports DC-aware replication out of the box:
+
+```bash
+# Tag nodes with their DC
+PEKKO_DC=eu-west-1 ./gradlew run
+PEKKO_DC=us-east-1 ./gradlew run
+```
+
+| Consistency | Behavior |
+|-------------|----------|
+| `WriteMajority` | Majority of ALL nodes (current) |
+| `WriteMajorityPlus` | Majority from LOCAL DC + some remote |
+| `WriteLocal` | Local only, cross-DC via gossip |
+
+For geo-distributed deployment:
+- Each DC can serve local users immediately (read local replica)
+- Fresh data spreads to other DCs via gossip (~200ms within DC, longer cross-DC)
+- `WriteMajorityPlus` ensures local DC consistency before responding
+- Cross-DC failure detector tuned for WAN latency (10s vs 1s)
+
+Current setup uses `WriteMajority` which works fine for single-region multi-AZ.
+For true multi-region, switch to `WriteMajorityPlus` or accept eventual consistency cross-DC.
+
+---
+
 ### Why No Durable Storage?
 
 Considered and rejected. For data loss to matter, you'd need:

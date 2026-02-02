@@ -182,6 +182,10 @@ public class TubeStatusReplicator extends AbstractBehavior<TubeStatusReplicator.
         // This is async - we don't block, but majority of nodes will have data
         // within ~200ms (gossip interval). Falls back to eventual consistency
         // if majority unreachable (partition).
+        //
+        // Multi-DC note: WriteMajority counts ALL nodes across DCs.
+        // For DC-locality, use WriteMajorityPlus(timeout, minCap) which ensures
+        // majority from local DC + additional from remote DCs.
         replicatorAdapter.askUpdate(
                 askReplyTo -> new Replicator.Update<>(
                         STATUS_KEY,
