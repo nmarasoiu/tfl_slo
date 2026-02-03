@@ -9,6 +9,7 @@ A resilient service providing London Underground status information with SRE bes
 | [DESIGN.md](DESIGN.md) | Architecture, tech choices, trade-offs |
 | [SLO_DEFINITION.md](SLO_DEFINITION.md) | SLIs, SLOs, alerting strategy |
 | [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md) | Prod checklist, testing strategy |
+| [ops/](ops/INDEX.md) | Operations: monitoring, deployment, security, infrastructure |
 
 ---
 
