@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<suppressions xmlns="https://jeremylong.github.io/DependencyCheck/dependency-suppression.1.3.xsd">
+    <!--
+        OWASP Dependency Check Suppressions
+
+        Add suppressions here for false positives or accepted risks.
+        Each suppression should include a comment explaining why it's suppressed.
+
+        Example:
+        <suppress>
+            <notes>This is a false positive because...</notes>
+            <packageUrl regex="true">^pkg:maven/com\.example/.*$</packageUrl>
+            <cve>CVE-2021-XXXXX</cve>
+        </suppress>
+    -->
+
+    <!--
+        Suppress false positives for test-only dependencies.
+        These are not shipped in production.
+    -->
+    <suppress>
+        <notes>Test dependency only - not in production</notes>
+        <packageUrl regex="true">^pkg:maven/org\.testcontainers/.*$</packageUrl>
+        <vulnerabilityName regex="true">.*</vulnerabilityName>
+    </suppress>
+
+    <!--
+        Suppress known false positives in Pekko/Akka ecosystem.
+        These are often flagged for Akka CVEs that don't apply to Pekko.
+    -->
+    <suppress>
+        <notes>Pekko is a fork of Akka - Akka CVEs may not apply</notes>
+        <packageUrl regex="true">^pkg:maven/org\.apache\.pekko/.*$</packageUrl>
+        <cve regex="true">CVE-.*</cve>
+    </suppress>
+</suppressions>

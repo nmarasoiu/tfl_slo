@@ -77,6 +77,7 @@ public class TubeStatusRoutes extends AllDirectives {
                 .registerModule(new JavaTimeModule());
     }
 
+    /** Defines all HTTP routes for the tube status API. */
     public Route routes() {
         return handleExceptions(exceptionHandler(),
                 () -> handleRejections(rejectionHandler(),
@@ -315,7 +316,8 @@ public class TubeStatusRoutes extends AllDirectives {
     }
 
     private Route getLineStatusWithDateRange(String lineId, String fromStr, String toStr) {
-        LocalDate from, to;
+        LocalDate from;
+        LocalDate to;
         try {
             from = LocalDate.parse(fromStr, DateTimeFormatter.ISO_LOCAL_DATE);
             to = LocalDate.parse(toStr, DateTimeFormatter.ISO_LOCAL_DATE);

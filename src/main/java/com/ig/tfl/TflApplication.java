@@ -31,9 +31,14 @@ import java.util.concurrent.CompletionStage;
  * - CRDT-replicated tube status actor
  * - HTTP server for REST API
  */
-public class TflApplication {
+public final class TflApplication {
     private static final Logger log = LoggerFactory.getLogger(TflApplication.class);
 
+    private TflApplication() {
+        // Utility class - prevent instantiation
+    }
+
+    /** Application entry point. Starts the Pekko cluster and HTTP server. */
     public static void main(String[] args) {
         // Load configuration
         Config config = ConfigFactory.load();
@@ -100,8 +105,12 @@ public class TflApplication {
 
             // Register circuit breaker metric (using the client's circuit breaker)
             metrics.registerCircuitBreaker("tfl-api", () -> {
-                if (tflApiClient.isCircuitOpen()) return "OPEN";
-                if (tflApiClient.isCircuitHalfOpen()) return "HALF_OPEN";
+                if (tflApiClient.isCircuitOpen()) {
+                    return "OPEN";
+                }
+                if (tflApiClient.isCircuitHalfOpen()) {
+                    return "HALF_OPEN";
+                }
                 return "CLOSED";
             });
 

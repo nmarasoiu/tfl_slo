@@ -1,6 +1,10 @@
 plugins {
     java
     application
+    jacoco                                      // Code coverage
+    checkstyle                                  // Code style
+    id("com.github.spotbugs") version "6.0.7"  // Bug detection
+    id("org.owasp.dependencycheck") version "9.0.9"  // Security vulnerabilities
 }
 
 group = "com.ig.tfl"
@@ -72,10 +76,15 @@ application {
     mainClass.set("com.ig.tfl.TflApplication")
 }
 
+// =============================================================================
+// Testing Configuration
+// =============================================================================
+
 tasks.test {
     useJUnitPlatform {
         excludeTags("e2e", "container")
     }
+    finalizedBy(tasks.jacocoTestReport)  // Generate coverage after tests
 }
 
 // E2E tests that hit real TfL API - run separately
@@ -102,4 +111,137 @@ tasks.register<Test>("containerTest") {
         events("passed", "skipped", "failed", "standardOut")
         showStandardStreams = true
     }
+}
+
+// Run all test suites
+tasks.register("allTests") {
+    description = "Runs all test suites (unit, container, e2e)"
+    group = "verification"
+    dependsOn("test", "containerTest", "e2eTest")
+}
+
+// =============================================================================
+// JaCoCo - Code Coverage
+// =============================================================================
+
+jacoco {
+    toolVersion = "0.8.11"
+}
+
+tasks.jacocoTestReport {
+    dependsOn(tasks.test)
+    reports {
+        xml.required.set(true)   // For CI integration
+        html.required.set(true)  // Human-readable report
+        csv.required.set(false)
+    }
+}
+
+tasks.jacocoTestCoverageVerification {
+    violationRules {
+        rule {
+            limit {
+                // Minimum 70% line coverage
+                minimum = "0.70".toBigDecimal()
+            }
+        }
+        rule {
+            limit {
+                counter = "BRANCH"
+                // Minimum 55% branch coverage (current: ~58%)
+                minimum = "0.55".toBigDecimal()
+            }
+        }
+    }
+}
+
+// =============================================================================
+// Checkstyle - Code Style
+// =============================================================================
+
+checkstyle {
+    toolVersion = "10.12.5"
+    configFile = file("config/checkstyle/checkstyle.xml")
+    isIgnoreFailures = false  // Fail build on violations
+    maxWarnings = 0
+}
+
+tasks.checkstyleMain {
+    source = fileTree("src/main/java")
+}
+
+tasks.checkstyleTest {
+    source = fileTree("src/test/java")
+}
+
+// =============================================================================
+// SpotBugs - Bug Detection
+// =============================================================================
+
+spotbugs {
+    ignoreFailures.set(false)
+    showStackTraces.set(true)
+    showProgress.set(true)
+    effort.set(com.github.spotbugs.snom.Effort.MAX)
+    reportLevel.set(com.github.spotbugs.snom.Confidence.MEDIUM)
+    excludeFilter.set(file("config/spotbugs/exclude.xml"))
+}
+
+tasks.spotbugsMain {
+    reports.create("html") {
+        required.set(true)
+        outputLocation.set(file("${layout.buildDirectory.get()}/reports/spotbugs/main.html"))
+    }
+    reports.create("xml") {
+        required.set(true)
+    }
+}
+
+tasks.spotbugsTest {
+    reports.create("html") {
+        required.set(true)
+    }
+}
+
+// =============================================================================
+// OWASP Dependency Check - Security Vulnerabilities
+// =============================================================================
+
+dependencyCheck {
+    failBuildOnCVSS = 7.0f  // Fail on HIGH or CRITICAL vulnerabilities
+    formats = listOf("HTML", "JSON")
+    suppressionFile = "config/owasp/suppressions.xml"
+    analyzers.apply {
+        assemblyEnabled = false  // Disable .NET analyzer
+        nodeEnabled = false      // Disable Node.js analyzer
+    }
+}
+
+// =============================================================================
+// Quality Gate - Run all checks
+// =============================================================================
+
+tasks.register("qualityCheck") {
+    description = "Runs all quality checks (tests, coverage, style, bugs, security)"
+    group = "verification"
+    dependsOn(
+        "test",
+        "jacocoTestCoverageVerification",
+        "checkstyleMain",
+        "checkstyleTest",
+        "spotbugsMain",
+        "spotbugsTest"
+    )
+}
+
+// Full verification including security scan (slower)
+tasks.register("fullCheck") {
+    description = "Runs all checks including OWASP dependency scan"
+    group = "verification"
+    dependsOn("qualityCheck", "dependencyCheckAnalyze")
+}
+
+// Make 'check' task run quality checks
+tasks.check {
+    dependsOn("qualityCheck")
 }

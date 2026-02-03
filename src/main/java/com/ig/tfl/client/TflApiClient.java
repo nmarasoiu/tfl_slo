@@ -90,6 +90,7 @@ public class TflApiClient implements TflClient {
         this(system, nodeId, baseUrl, config, DEFAULT_RESPONSE_TIMEOUT, new Tracing());
     }
 
+    /** Creates a TflApiClient with full configuration. */
     public TflApiClient(ActorSystem<?> system, String nodeId, String baseUrl,
                         ResilienceConfig config, Duration responseTimeout, Tracing tracing) {
         this.system = system;
@@ -296,6 +297,8 @@ public class TflApiClient implements TflClient {
             this.statusCode = statusCode;
         }
 
-        public int getStatusCode() { return statusCode; }
+        public int getStatusCode() {
+            return statusCode;
+        }
     }
 }

@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<!DOCTYPE suppressions PUBLIC
+    "-//Checkstyle//DTD SuppressionFilter Configuration 1.2//EN"
+    "https://checkstyle.org/dtds/suppressions_1_2.dtd">
+
+<suppressions>
+    <!-- Suppress checks for test files - more lenient -->
+    <suppress checks="JavadocMethod" files=".*Test\.java"/>
+    <suppress checks="MissingJavadocMethod" files=".*Test\.java"/>
+    <suppress checks="MethodLength" files=".*Test\.java"/>
+    <suppress checks="FileLength" files=".*Test\.java"/>
+
+    <!-- Allow star imports in tests (JUnit, AssertJ, WireMock, etc.) -->
+    <suppress checks="AvoidStarImport" files=".*Test\.java"/>
+
+    <!-- Allow BDD-style test method names with underscores -->
+    <suppress checks="MethodName" files=".*Test\.java"/>
+
+    <!-- Allow lenient constant naming in tests (for fixtures) -->
+    <suppress checks="ConstantName" files=".*Test\.java"/>
+
+    <!-- Allow unused imports in tests (sometimes leftover from refactoring) -->
+    <suppress checks="UnusedImports" files=".*Test\.java"/>
+
+    <!-- Allow whitespace flexibility in tests -->
+    <suppress checks="WhitespaceAround" files=".*Test\.java"/>
+</suppressions>

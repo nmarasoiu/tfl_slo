@@ -1,7 +1,6 @@
 package com.ig.tfl.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-import com.fasterxml.jackson.annotation.JsonProperty;
 
 import java.io.Serializable;
 import java.time.Instant;
@@ -31,7 +30,9 @@ public record TubeStatus(
      * Used by LWW-Register to determine which value wins.
      */
     public boolean isFresherThan(TubeStatus other) {
-        if (other == null) return true;
+        if (other == null) {
+            return true;
+        }
         return this.queriedAt.isAfter(other.queriedAt);
     }
 

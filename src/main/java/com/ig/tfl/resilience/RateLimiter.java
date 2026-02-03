@@ -99,8 +99,13 @@ public class RateLimiter {
             this.retryAfter = retryAfter;
         }
 
-        public String getClientKey() { return clientKey; }
-        public Duration getRetryAfter() { return retryAfter; }
+        public String getClientKey() {
+            return clientKey;
+        }
+
+        public Duration getRetryAfter() {
+            return retryAfter;
+        }
     }
 
     /**

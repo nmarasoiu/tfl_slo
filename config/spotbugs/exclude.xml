@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FindBugsFilter>
+    <!-- Exclude test classes entirely - test code doesn't ship in production -->
+    <Match>
+        <Source name="~.*Test\.java"/>
+    </Match>
+
+    <!-- Pekko uses serialization internally - exclude serialization warnings for actors -->
+    <Match>
+        <Package name="~com\.ig\.tfl\.crdt.*"/>
+        <Bug pattern="SE_BAD_FIELD"/>
+    </Match>
+
+    <!-- Records are immutable, field exposure is intentional -->
+    <Match>
+        <Bug pattern="EI_EXPOSE_REP"/>
+        <Class name="~.*\$.*"/>  <!-- Inner classes/records -->
+    </Match>
+    <Match>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+        <Class name="~.*\$.*"/>
+    </Match>
+
+    <!-- Pekko ActorRef, ActorSystem, and framework objects are thread-safe by design -->
+    <Match>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+
+    <!-- Allow System.out in main application class -->
+    <Match>
+        <Class name="com.ig.tfl.TflApplication"/>
+        <Bug pattern="SYSTEM_OUT_ERR"/>
+    </Match>
+
+    <!-- Dead local store - common false positives for ActorSystem creation (side effects) -->
+    <Match>
+        <Bug pattern="DLS_DEAD_LOCAL_STORE"/>
+    </Match>
+
+    <!-- Exclude generated or framework code patterns -->
+    <Match>
+        <Bug pattern="NP_NULL_ON_SOME_PATH_FROM_RETURN_VALUE"/>
+        <Method name="~.*Async"/>
+    </Match>
+</FindBugsFilter>

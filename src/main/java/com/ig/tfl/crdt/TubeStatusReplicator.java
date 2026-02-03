@@ -4,12 +4,17 @@ import com.ig.tfl.client.TflGateway;
 import com.ig.tfl.model.TubeStatus;
 import org.apache.pekko.actor.typed.ActorRef;
 import org.apache.pekko.actor.typed.Behavior;
-import org.apache.pekko.actor.typed.javadsl.*;
-import org.apache.pekko.cluster.ddata.*;
+import org.apache.pekko.actor.typed.javadsl.AbstractBehavior;
+import org.apache.pekko.actor.typed.javadsl.ActorContext;
+import org.apache.pekko.actor.typed.javadsl.Behaviors;
+import org.apache.pekko.actor.typed.javadsl.Receive;
+import org.apache.pekko.actor.typed.javadsl.TimerScheduler;
+import org.apache.pekko.cluster.ddata.Key;
+import org.apache.pekko.cluster.ddata.LWWRegister;
+import org.apache.pekko.cluster.ddata.LWWRegisterKey;
 import org.apache.pekko.cluster.ddata.typed.javadsl.DistributedData;
 import org.apache.pekko.cluster.ddata.typed.javadsl.Replicator;
 import org.apache.pekko.cluster.ddata.typed.javadsl.ReplicatorMessageAdapter;
-import static org.apache.pekko.cluster.ddata.typed.javadsl.Replicator.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -329,7 +334,9 @@ public class TubeStatusReplicator extends AbstractBehavior<TubeStatusReplicator.
     }
 
     private boolean isFreshEnough(TubeStatus status) {
-        if (status == null) return false;
+        if (status == null) {
+            return false;
+        }
         return status.queriedAt().isAfter(
                 Instant.now().minus(recentEnoughThreshold));
     }

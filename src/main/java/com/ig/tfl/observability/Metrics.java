@@ -107,7 +107,9 @@ public class Metrics {
      * /api/v1/tube/central/status -> /api/v1/tube/{lineId}/status
      */
     private String normalizePath(String path) {
-        if (path == null) return "unknown";
+        if (path == null) {
+            return "unknown";
+        }
 
         // Replace line IDs with placeholder
         return path.replaceAll("/tube/[^/]+/status", "/tube/{lineId}/status")
