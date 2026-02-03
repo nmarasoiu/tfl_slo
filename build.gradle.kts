@@ -57,5 +57,20 @@ application {
 }
 
 tasks.test {
-    useJUnitPlatform()
+    useJUnitPlatform {
+        excludeTags("e2e")
+    }
+}
+
+// E2E tests that hit real TfL API - run separately
+tasks.register<Test>("e2eTest") {
+    description = "Runs E2E smoke tests against real TfL API"
+    group = "verification"
+    useJUnitPlatform {
+        includeTags("e2e")
+    }
+    testLogging {
+        events("passed", "skipped", "failed", "standardOut")
+        showStandardStreams = true
+    }
 }
