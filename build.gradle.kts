@@ -45,6 +45,9 @@ dependencies {
     implementation("org.apache.pekko:pekko-http-jackson_2.13:$pekkoHttpVersion")
     implementation("org.apache.pekko:pekko-stream_2.13:$pekkoVersion")
 
+    // Pekko Serialization (for CRDT data replication)
+    implementation("org.apache.pekko:pekko-serialization-jackson_2.13:$pekkoVersion")
+
     // Jackson for JSON
     implementation("com.fasterxml.jackson.core:jackson-databind:$jacksonVersion")
     implementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310:$jacksonVersion")

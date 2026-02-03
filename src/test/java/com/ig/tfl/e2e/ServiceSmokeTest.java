@@ -15,6 +15,8 @@ import org.apache.pekko.http.javadsl.Http;
 import org.apache.pekko.http.javadsl.ServerBinding;
 import org.apache.pekko.http.javadsl.model.HttpRequest;
 import org.apache.pekko.http.javadsl.model.HttpResponse;
+import org.apache.pekko.cluster.typed.Cluster;
+import org.apache.pekko.cluster.typed.Join;
 import org.apache.pekko.stream.Materializer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -62,12 +64,22 @@ class ServiceSmokeTest {
 
     @BeforeAll
     void setupClass() throws Exception {
-        // Create test actor system with cluster disabled
+        // Create test actor system with single-node cluster
+        // TubeStatusReplicator requires cluster for CRDT operations
         Config config = ConfigFactory.parseString("""
                 pekko {
                     loglevel = "INFO"
-                    actor.provider = "local"
-                    cluster.enabled = false
+                    actor.provider = "cluster"
+                    remote.artery {
+                        canonical {
+                            hostname = "127.0.0.1"
+                            port = 0
+                        }
+                    }
+                    cluster {
+                        seed-nodes = []
+                        downing-provider-class = ""
+                    }
                 }
                 tfl {
                     node-id = "smoke-test-node"
@@ -95,6 +107,14 @@ class ServiceSmokeTest {
 
         testKit = ActorTestKit.create("service-smoke-test", config);
         objectMapper = new ObjectMapper();
+
+        // Form single-node cluster (required for CRDT operations)
+        Cluster cluster = Cluster.get(testKit.system());
+        cluster.manager().tell(Join.create(cluster.selfMember().address()));
+
+        // Wait for cluster to be up
+        await().atMost(10, TimeUnit.SECONDS).until(() ->
+                cluster.selfMember().status().toString().equals("Up"));
 
         // Create metrics
         Metrics metrics = new Metrics();
