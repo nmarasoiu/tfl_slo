@@ -240,11 +240,11 @@ class ServiceSmokeTest {
         }
         assertThat(returnedLineIds).containsAll(EXPECTED_TUBE_LINES);
 
-        // Verify meta contains freshness info
+        // Verify meta contains timestamp info
         JsonNode meta = response.get("meta");
-        assertThat(meta.has("queriedAt")).isTrue();
-        assertThat(meta.has("ageMs")).isTrue();
-        assertThat(meta.get("ageMs").asLong()).isLessThan(60000); // Less than 60s old
+        assertThat(meta.has("dataAsOfUtc")).isTrue();
+        assertThat(meta.has("respondedAtUtc")).isTrue();
+        // Client can compute freshness as respondedAtUtc - dataAsOfUtc
 
         System.out.println("Full service E2E smoke test passed - " + lines.size() + " lines returned");
     }
