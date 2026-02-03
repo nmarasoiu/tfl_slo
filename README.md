@@ -1,16 +1,33 @@
 # TfL Tube Status Service
 
-A resilient service providing London Underground status information with SRE best practices.
+A resilient caching service for London Underground status, demonstrating SRE patterns.
+
+> **Start here:** [EXECUTIVE_SUMMARY.md](EXECUTIVE_SUMMARY.md) - 5-minute overview of the key decisions.
+
+---
+
+## The Five Big Decisions
+
+| # | Decision | Why |
+|---|----------|-----|
+| 1 | **AP over CP** | Survives partitions without blocking |
+| 2 | **Cache-first** | Users never wait for TfL API |
+| 3 | **No leader election** | Gossip naturally deduplicates |
+| 4 | **Selective retry** | Don't retry 4xx (client errors) |
+| 5 | **SLO-driven alerting** | Page on budget burn, not noise |
+
+---
 
 ## Documentation
 
 | Document | Contents |
 |----------|----------|
+| [EXECUTIVE_SUMMARY.md](EXECUTIVE_SUMMARY.md) | Quick overview of decisions and architecture |
 | [DESIGN.md](DESIGN.md) | Architecture, tech choices, trade-offs |
 | [SLO_DEFINITION.md](SLO_DEFINITION.md) | SLIs, SLOs, alerting strategy |
 | [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md) | Prod checklist, testing strategy |
-| [ops/](ops/INDEX.md) | Operations: monitoring, deployment, security, infrastructure |
-| [docs/DATE_RANGE_CACHING.md](docs/DATE_RANGE_CACHING.md) | Future: date range caching options |
+| [ops/](ops/INDEX.md) | Operations guides |
+| [docs/adr/](docs/adr/) | Architecture Decision Records |
 
 ---
 
