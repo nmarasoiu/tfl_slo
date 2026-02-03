@@ -5,8 +5,6 @@ import com.ig.tfl.client.TflApiClient;
 import com.ig.tfl.client.TflGateway;
 import com.ig.tfl.crdt.TubeStatusReplicator;
 import com.ig.tfl.observability.Metrics;
-import com.ig.tfl.resilience.CircuitBreaker;
-import com.ig.tfl.resilience.RetryPolicy;
 import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
 import org.apache.pekko.actor.typed.ActorRef;
@@ -79,33 +77,36 @@ public class TflApplication {
             // Create metrics registry
             this.metrics = new Metrics();
 
-            // Create resilience components from config
+            // Create resilience config from application config
             int cbFailureThreshold = config.getInt("tfl.circuit-breaker.failure-threshold");
             Duration cbOpenDuration = config.getDuration("tfl.circuit-breaker.open-duration");
-            CircuitBreaker circuitBreaker = new CircuitBreaker("tfl-api", cbFailureThreshold, cbOpenDuration);
-
-            // Register circuit breaker metric
-            metrics.registerCircuitBreaker("tfl-api", circuitBreaker::getState);
-
-            // Register data freshness metric
-            metrics.registerDataFreshness(nodeId);
-
+            Duration cbCallTimeout = config.getDuration("tfl.http.response-timeout");
             int retryMaxRetries = config.getInt("tfl.retry.max-retries");
             Duration retryBaseDelay = config.getDuration("tfl.retry.base-delay");
-            Duration retryMaxDelay = config.getDuration("tfl.retry.max-delay");
-            double retryJitterFactor = config.getDouble("tfl.retry.jitter-factor");
-            RetryPolicy retryPolicy = RetryPolicy.builder()
-                    .maxRetries(retryMaxRetries)
-                    .baseDelay(retryBaseDelay)
-                    .maxDelay(retryMaxDelay)
-                    .jitterFactor(retryJitterFactor)
-                    .build();
 
-            // Create TfL API client with injected resilience dependencies
+            TflApiClient.ResilienceConfig resilienceConfig = new TflApiClient.ResilienceConfig(
+                    cbFailureThreshold,
+                    cbCallTimeout,
+                    cbOpenDuration,
+                    retryMaxRetries,
+                    retryBaseDelay
+            );
+
+            // Create TfL API client with Pekko's built-in resilience patterns
             Duration responseTimeout = config.getDuration("tfl.http.response-timeout");
             TflApiClient tflApiClient = new TflApiClient(
                     context.getSystem(), nodeId, "https://api.tfl.gov.uk",
-                    circuitBreaker, retryPolicy, responseTimeout);
+                    resilienceConfig, responseTimeout, new com.ig.tfl.observability.Tracing());
+
+            // Register circuit breaker metric (using the client's circuit breaker)
+            metrics.registerCircuitBreaker("tfl-api", () -> {
+                if (tflApiClient.isCircuitOpen()) return "OPEN";
+                if (tflApiClient.isCircuitHalfOpen()) return "HALF_OPEN";
+                return "CLOSED";
+            });
+
+            // Register data freshness metric
+            metrics.registerDataFreshness(nodeId);
 
             // Create TflGateway actor - single point of contact for TfL API
             this.tflGateway = context.spawn(

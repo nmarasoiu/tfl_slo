@@ -1,7 +1,6 @@
 package com.ig.tfl.client;
 
 import com.ig.tfl.model.TubeStatus;
-import com.ig.tfl.resilience.CircuitBreaker;
 
 import java.time.LocalDate;
 import java.util.concurrent.CompletionStage;
@@ -23,7 +22,17 @@ public interface TflClient {
     CompletionStage<TubeStatus> fetchLineStatusAsync(String lineId, LocalDate from, LocalDate to);
 
     /**
-     * Get circuit breaker state (for health checks).
+     * Check if circuit breaker is open.
      */
-    CircuitBreaker.State getCircuitState();
+    boolean isCircuitOpen();
+
+    /**
+     * Check if circuit breaker is half-open.
+     */
+    boolean isCircuitHalfOpen();
+
+    /**
+     * Check if circuit breaker is closed (healthy).
+     */
+    boolean isCircuitClosed();
 }

@@ -16,8 +16,8 @@ repositories {
     mavenCentral()
 }
 
-val pekkoVersion = "1.1.2"
-val pekkoHttpVersion = "1.1.0"
+val pekkoVersion = "1.4.0"
+val pekkoHttpVersion = "1.3.0"
 val jacksonVersion = "2.17.0"
 val micrometerVersion = "1.12.0"
 val openTelemetryVersion = "1.34.0"
@@ -60,6 +60,11 @@ dependencies {
     testImplementation("org.awaitility:awaitility:4.2.0")
     testImplementation("io.opentelemetry:opentelemetry-sdk-testing:$openTelemetryVersion")
 
+    // Testcontainers for Docker-based integration tests
+    testImplementation("org.testcontainers:testcontainers:1.19.3")
+    testImplementation("org.testcontainers:junit-jupiter:1.19.3")
+    testImplementation("org.testcontainers:toxiproxy:1.19.3")
+
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
@@ -69,7 +74,7 @@ application {
 
 tasks.test {
     useJUnitPlatform {
-        excludeTags("e2e")
+        excludeTags("e2e", "container")
     }
 }
 
@@ -79,6 +84,19 @@ tasks.register<Test>("e2eTest") {
     group = "verification"
     useJUnitPlatform {
         includeTags("e2e")
+    }
+    testLogging {
+        events("passed", "skipped", "failed", "standardOut")
+        showStandardStreams = true
+    }
+}
+
+// Container-based integration tests (requires Docker)
+tasks.register<Test>("containerTest") {
+    description = "Runs Testcontainers-based integration tests"
+    group = "verification"
+    useJUnitPlatform {
+        includeTags("container")
     }
     testLogging {
         events("passed", "skipped", "failed", "standardOut")

@@ -1,7 +1,6 @@
 package com.ig.tfl.client;
 
 import com.ig.tfl.model.TubeStatus;
-import com.ig.tfl.resilience.CircuitBreaker;
 import org.apache.pekko.actor.typed.ActorRef;
 import org.apache.pekko.actor.typed.Behavior;
 import org.apache.pekko.actor.typed.javadsl.AbstractBehavior;
@@ -66,7 +65,12 @@ public class TflGateway extends AbstractBehavior<TflGateway.Command> {
         }
     }
 
-    public record CircuitStateResponse(CircuitBreaker.State state) {}
+    /**
+     * Circuit breaker state for health checks.
+     */
+    public enum CircuitState { CLOSED, OPEN, HALF_OPEN }
+
+    public record CircuitStateResponse(CircuitState state) {}
 
     // Dependencies
     private final TflApiClient client;
@@ -112,7 +116,15 @@ public class TflGateway extends AbstractBehavior<TflGateway.Command> {
     }
 
     private Behavior<Command> onGetCircuitState(GetCircuitState msg) {
-        msg.replyTo().tell(new CircuitStateResponse(client.getCircuitState()));
+        CircuitState state;
+        if (client.isCircuitOpen()) {
+            state = CircuitState.OPEN;
+        } else if (client.isCircuitHalfOpen()) {
+            state = CircuitState.HALF_OPEN;
+        } else {
+            state = CircuitState.CLOSED;
+        }
+        msg.replyTo().tell(new CircuitStateResponse(state));
         return this;
     }
 

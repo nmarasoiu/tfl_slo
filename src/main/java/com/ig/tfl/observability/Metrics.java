@@ -1,6 +1,5 @@
 package com.ig.tfl.observability;
 
-import com.ig.tfl.resilience.CircuitBreaker;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -32,9 +31,9 @@ public class Metrics {
 
     /**
      * Register circuit breaker state gauge.
-     * Called once at startup with reference to the circuit breaker.
+     * Accepts a String supplier that returns "CLOSED", "OPEN", or "HALF_OPEN".
      */
-    public void registerCircuitBreaker(String name, Supplier<CircuitBreaker.State> stateSupplier) {
+    public void registerCircuitBreaker(String name, Supplier<String> stateSupplier) {
         Gauge.builder("circuit_breaker_state", stateSupplier, state -> stateToNumber(state.get()))
                 .tag("name", name)
                 .description("Circuit breaker state: 0=CLOSED, 1=HALF_OPEN, 2=OPEN")
@@ -94,11 +93,12 @@ public class Metrics {
         return registry;
     }
 
-    private double stateToNumber(CircuitBreaker.State state) {
+    private double stateToNumber(String state) {
         return switch (state) {
-            case CLOSED -> 0;
-            case HALF_OPEN -> 1;
-            case OPEN -> 2;
+            case "CLOSED" -> 0;
+            case "HALF_OPEN" -> 1;
+            case "OPEN" -> 2;
+            default -> -1;
         };
     }
 

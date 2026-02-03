@@ -5,12 +5,11 @@ import com.github.tomakehurst.wiremock.client.WireMock;
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
 import com.github.tomakehurst.wiremock.stubbing.Scenario;
 import com.ig.tfl.model.TubeStatus;
-import com.ig.tfl.resilience.CircuitBreaker;
-import com.ig.tfl.resilience.RetryPolicy;
 import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
 import org.apache.pekko.actor.typed.ActorSystem;
 import org.apache.pekko.actor.typed.javadsl.Behaviors;
+import org.apache.pekko.pattern.CircuitBreakerOpenException;
 import org.junit.jupiter.api.*;
 
 import java.io.IOException;
@@ -27,7 +26,7 @@ import static org.awaitility.Awaitility.await;
  * Integration tests for TflApiClient.
  *
  * Uses WireMock to simulate TfL API responses.
- * Tests real HTTP, real circuit breaker, real retry logic.
+ * Tests real HTTP, Pekko's built-in circuit breaker and retry.
  *
  * Only the TfL endpoint is mocked (external system boundary).
  */
@@ -162,7 +161,7 @@ class TflApiClientIntegrationTest {
 
         // Wait a moment for circuit state to update
         await().atMost(1, TimeUnit.SECONDS).untilAsserted(() ->
-                assertThat(client.getCircuitState()).isEqualTo(CircuitBreaker.State.OPEN));
+                assertThat(client.isCircuitOpen()).isTrue());
     }
 
     @Test
@@ -181,10 +180,11 @@ class TflApiClientIntegrationTest {
         wireMock.resetRequests();
 
         // Next request should be rejected by circuit without hitting server
+        // Pekko throws CircuitBreakerOpenException
         assertThatThrownBy(() ->
                 client.fetchAllLinesAsync().toCompletableFuture().join())
                 .isInstanceOf(CompletionException.class)
-                .hasCauseInstanceOf(CircuitBreaker.CircuitOpenException.class);
+                .hasCauseInstanceOf(CircuitBreakerOpenException.class);
 
         // Should not have made any new requests
         wireMock.verify(0, getRequestedFor(urlPathEqualTo("/Line/Mode/tube/Status")));

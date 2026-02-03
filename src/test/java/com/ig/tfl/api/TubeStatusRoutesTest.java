@@ -6,7 +6,6 @@ import com.ig.tfl.client.TflGateway;
 import com.ig.tfl.crdt.TubeStatusReplicator;
 import com.ig.tfl.model.TubeStatus;
 import com.ig.tfl.observability.Metrics;
-import com.ig.tfl.resilience.CircuitBreaker;
 import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
 import org.apache.pekko.actor.testkit.typed.javadsl.ActorTestKit;
@@ -402,7 +401,7 @@ class TubeStatusRoutesTest {
         }
 
         private Behavior<TflGateway.Command> onGetCircuitState(TflGateway.GetCircuitState msg) {
-            msg.replyTo().tell(new TflGateway.CircuitStateResponse(CircuitBreaker.State.CLOSED));
+            msg.replyTo().tell(new TflGateway.CircuitStateResponse(TflGateway.CircuitState.CLOSED));
             return this;
         }
     }

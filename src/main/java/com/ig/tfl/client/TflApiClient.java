@@ -7,13 +7,11 @@ import com.ig.tfl.model.TflApiResponse;
 import com.ig.tfl.model.TubeStatus;
 import com.ig.tfl.model.TubeStatus.LineStatus;
 import com.ig.tfl.observability.Tracing;
-import com.ig.tfl.resilience.CircuitBreaker;
-import com.ig.tfl.resilience.RetryPolicy;
 import org.apache.pekko.actor.typed.ActorSystem;
 import org.apache.pekko.http.javadsl.Http;
 import org.apache.pekko.http.javadsl.model.HttpRequest;
 import org.apache.pekko.http.javadsl.model.HttpResponse;
-import org.apache.pekko.http.javadsl.model.StatusCodes;
+import org.apache.pekko.pattern.CircuitBreaker;
 import org.apache.pekko.stream.Materializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -23,13 +21,18 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
-import static com.ig.tfl.resilience.RetryPolicy.HttpStatusException;
+import static org.apache.pekko.pattern.Patterns.retry;
 
 /**
  * Client for TfL API using Pekko HTTP (non-blocking).
+ *
+ * Uses Pekko's built-in resilience patterns:
+ * - CircuitBreaker from org.apache.pekko.pattern
+ * - Retry from org.apache.pekko.pattern.Patterns
  */
 public class TflApiClient implements TflClient {
     private static final Logger log = LoggerFactory.getLogger(TflApiClient.class);
@@ -42,41 +45,83 @@ public class TflApiClient implements TflClient {
     private final Materializer materializer;
     private final ObjectMapper objectMapper;
     private final CircuitBreaker circuitBreaker;
-    private final RetryPolicy retryPolicy;
     private final Tracing tracing;
     private final String nodeId;
     private final String baseUrl;
     private final Duration responseTimeout;
 
+    // Retry configuration
+    private final int maxRetries;
+    private final Duration retryDelay;
+
+    /**
+     * Configuration for circuit breaker and retry.
+     */
+    public record ResilienceConfig(
+            int cbMaxFailures,
+            Duration cbCallTimeout,
+            Duration cbResetTimeout,
+            int maxRetries,
+            Duration retryDelay
+    ) {
+        public static ResilienceConfig defaults() {
+            return new ResilienceConfig(
+                    5,                          // 5 failures to open
+                    Duration.ofSeconds(10),     // 10s call timeout
+                    Duration.ofSeconds(30),     // 30s before half-open
+                    3,                          // 3 retries
+                    Duration.ofSeconds(1)       // 1s between retries
+            );
+        }
+    }
+
     public TflApiClient(ActorSystem<?> system, String nodeId) {
-        this(system, nodeId, DEFAULT_TFL_BASE_URL,
-                CircuitBreaker.withDefaults("tfl-api"),
-                RetryPolicy.defaults(),
-                DEFAULT_RESPONSE_TIMEOUT,
-                new Tracing());
+        this(system, nodeId, DEFAULT_TFL_BASE_URL, ResilienceConfig.defaults(),
+             DEFAULT_RESPONSE_TIMEOUT, new Tracing());
     }
 
     public TflApiClient(ActorSystem<?> system, String nodeId, String baseUrl) {
-        this(system, nodeId, baseUrl,
-                CircuitBreaker.withDefaults("tfl-api"),
-                RetryPolicy.defaults(),
-                DEFAULT_RESPONSE_TIMEOUT,
-                new Tracing());
+        this(system, nodeId, baseUrl, ResilienceConfig.defaults(),
+             DEFAULT_RESPONSE_TIMEOUT, new Tracing());
     }
 
     public TflApiClient(ActorSystem<?> system, String nodeId, String baseUrl,
-                        CircuitBreaker circuitBreaker, RetryPolicy retryPolicy) {
-        this(system, nodeId, baseUrl, circuitBreaker, retryPolicy, DEFAULT_RESPONSE_TIMEOUT, new Tracing());
+                        ResilienceConfig config) {
+        this(system, nodeId, baseUrl, config, DEFAULT_RESPONSE_TIMEOUT, new Tracing());
     }
 
     public TflApiClient(ActorSystem<?> system, String nodeId, String baseUrl,
-                        CircuitBreaker circuitBreaker, RetryPolicy retryPolicy,
-                        Duration responseTimeout) {
-        this(system, nodeId, baseUrl, circuitBreaker, retryPolicy, responseTimeout, new Tracing());
+                        ResilienceConfig config, Duration responseTimeout, Tracing tracing) {
+        this.system = system;
+        this.nodeId = nodeId;
+        this.baseUrl = baseUrl;
+        this.http = Http.get(system);
+        this.materializer = Materializer.createMaterializer(system);
+        this.objectMapper = new ObjectMapper()
+                .registerModule(new JavaTimeModule());
+        this.responseTimeout = responseTimeout;
+        this.tracing = tracing;
+
+        // Pekko's built-in CircuitBreaker
+        this.circuitBreaker = new CircuitBreaker(
+                system.classicSystem().dispatcher(),
+                system.classicSystem().scheduler(),
+                config.cbMaxFailures(),
+                config.cbCallTimeout(),
+                config.cbResetTimeout()
+        ).addOnOpenListener(() -> log.warn("Circuit breaker OPEN - TfL API failures exceeded threshold"))
+         .addOnHalfOpenListener(() -> log.info("Circuit breaker HALF_OPEN - testing recovery"))
+         .addOnCloseListener(() -> log.info("Circuit breaker CLOSED - TfL API recovered"));
+
+        this.maxRetries = config.maxRetries();
+        this.retryDelay = config.retryDelay();
     }
 
+    /**
+     * Constructor with pre-built CircuitBreaker (for testing).
+     */
     public TflApiClient(ActorSystem<?> system, String nodeId, String baseUrl,
-                        CircuitBreaker circuitBreaker, RetryPolicy retryPolicy,
+                        CircuitBreaker circuitBreaker, int maxRetries, Duration retryDelay,
                         Duration responseTimeout, Tracing tracing) {
         this.system = system;
         this.nodeId = nodeId;
@@ -86,26 +131,25 @@ public class TflApiClient implements TflClient {
         this.objectMapper = new ObjectMapper()
                 .registerModule(new JavaTimeModule());
         this.circuitBreaker = circuitBreaker;
-        this.retryPolicy = retryPolicy;
+        this.maxRetries = maxRetries;
+        this.retryDelay = retryDelay;
         this.responseTimeout = responseTimeout;
         this.tracing = tracing;
     }
 
     /**
      * Fetch all tube line statuses (async, non-blocking).
-     * Traced via OpenTelemetry to measure TfL API latency separately.
+     * Uses Pekko's built-in circuit breaker and retry patterns.
      */
     public CompletionStage<TubeStatus> fetchAllLinesAsync() {
         String url = baseUrl + "/Line/Mode/tube/Status";
         return tracing.traceTflCallAsync("fetch-all-lines", url, () ->
-                retryPolicy.executeAsync(() ->
-                        executeWithCircuitBreaker(this::doFetchAllLines)));
+                withRetry(() -> withCircuitBreaker(this::doFetchAllLines)));
     }
 
     /**
      * Fetch status for a specific line with date range (async, non-blocking).
      * Used for future/planned disruptions - bypasses cache, goes direct to TfL.
-     * Traced via OpenTelemetry to measure TfL API latency separately.
      */
     @Override
     public CompletionStage<TubeStatus> fetchLineStatusAsync(String lineId, LocalDate from, LocalDate to) {
@@ -114,29 +158,33 @@ public class TflApiClient implements TflClient {
                 from.format(DateTimeFormatter.ISO_LOCAL_DATE),
                 to.format(DateTimeFormatter.ISO_LOCAL_DATE));
         return tracing.traceTflCallAsync("fetch-line-" + lineId, url, () ->
-                retryPolicy.executeAsync(() ->
-                        executeWithCircuitBreaker(() -> doFetchLineStatus(lineId, from, to))));
+                withRetry(() -> withCircuitBreaker(() -> doFetchLineStatus(lineId, from, to))));
     }
 
-    // Circuit breaker wrapper
-    private CompletableFuture<TubeStatus> executeWithCircuitBreaker(
-            java.util.function.Supplier<CompletionStage<TubeStatus>> operation) {
+    /**
+     * Wrap operation with Pekko's built-in CircuitBreaker.
+     */
+    private CompletionStage<TubeStatus> withCircuitBreaker(
+            Callable<CompletionStage<TubeStatus>> operation) {
+        return circuitBreaker.callWithCircuitBreakerCS(operation);
+    }
 
-        CircuitBreaker.State state = circuitBreaker.getState();
-        if (state == CircuitBreaker.State.OPEN) {
-            return CompletableFuture.failedFuture(
-                    new CircuitBreaker.CircuitOpenException("tfl-api", Duration.ofSeconds(30)));
-        }
-
-        return operation.get()
-                .whenComplete((result, error) -> {
-                    if (error != null) {
-                        circuitBreaker.onFailure(error);
-                    } else {
-                        circuitBreaker.onSuccess();
-                    }
-                })
-                .toCompletableFuture();
+    /**
+     * Wrap operation with Pekko's built-in retry.
+     */
+    private CompletionStage<TubeStatus> withRetry(
+            Callable<CompletionStage<TubeStatus>> operation) {
+        return retry(
+                operation,
+                maxRetries,
+                retryDelay,
+                system.classicSystem().scheduler(),
+                system.executionContext()
+        ).whenComplete((result, error) -> {
+            if (error != null) {
+                log.warn("All {} retry attempts exhausted: {}", maxRetries, error.getMessage());
+            }
+        });
     }
 
     // Internal fetch methods using Pekko HTTP
@@ -210,9 +258,44 @@ public class TflApiClient implements TflClient {
     }
 
     /**
-     * Get circuit breaker state (for health checks).
+     * Get circuit breaker for health checks and metrics.
      */
-    public CircuitBreaker.State getCircuitState() {
-        return circuitBreaker.getState();
+    public CircuitBreaker getCircuitBreaker() {
+        return circuitBreaker;
+    }
+
+    /**
+     * Check if circuit is open.
+     */
+    public boolean isCircuitOpen() {
+        return circuitBreaker.isOpen();
+    }
+
+    /**
+     * Check if circuit is half-open.
+     */
+    public boolean isCircuitHalfOpen() {
+        return circuitBreaker.isHalfOpen();
+    }
+
+    /**
+     * Check if circuit is closed (healthy).
+     */
+    public boolean isCircuitClosed() {
+        return circuitBreaker.isClosed();
+    }
+
+    /**
+     * HTTP status exception for retry decisions.
+     */
+    public static class HttpStatusException extends RuntimeException {
+        private final int statusCode;
+
+        public HttpStatusException(int statusCode, String message) {
+            super(message);
+            this.statusCode = statusCode;
+        }
+
+        public int getStatusCode() { return statusCode; }
     }
 }

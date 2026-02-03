@@ -1,10 +1,10 @@
 package com.ig.tfl.observability;
 
-import com.ig.tfl.resilience.CircuitBreaker;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -63,8 +63,9 @@ class MetricsTest {
 
     @Test
     void recordsCircuitBreakerStateGauge() {
-        CircuitBreaker cb = new CircuitBreaker("test-cb", 3, Duration.ofSeconds(30));
-        metrics.registerCircuitBreaker("test-cb", cb::getState);
+        // Use a simple String supplier for testing
+        AtomicReference<String> state = new AtomicReference<>("CLOSED");
+        metrics.registerCircuitBreaker("test-cb", state::get);
 
         String scrape = metrics.scrape();
 
@@ -76,18 +77,30 @@ class MetricsTest {
 
     @Test
     void circuitBreakerGaugeReflectsStateChanges() {
-        CircuitBreaker cb = new CircuitBreaker("test-cb", 2, Duration.ofSeconds(30));
-        metrics.registerCircuitBreaker("test-cb", cb::getState);
+        // Use a mutable state holder
+        AtomicReference<String> state = new AtomicReference<>("CLOSED");
+        metrics.registerCircuitBreaker("test-cb", state::get);
 
-        // Trigger circuit open by recording failures
-        cb.onFailure(new RuntimeException("fail 1"));
-        cb.onFailure(new RuntimeException("fail 2"));
+        // Change state to OPEN
+        state.set("OPEN");
 
         String scrape = metrics.scrape();
 
         // Should now be OPEN (2)
         assertThat(scrape).contains("circuit_breaker_state{name=\"test-cb\"");
         assertThat(scrape).contains("2.0"); // OPEN state
+    }
+
+    @Test
+    void circuitBreakerGaugeSupportsHalfOpenState() {
+        AtomicReference<String> state = new AtomicReference<>("HALF_OPEN");
+        metrics.registerCircuitBreaker("test-cb", state::get);
+
+        String scrape = metrics.scrape();
+
+        // Should be HALF_OPEN (1)
+        assertThat(scrape).contains("circuit_breaker_state{name=\"test-cb\"");
+        assertThat(scrape).contains("1.0"); // HALF_OPEN state
     }
 
     @Test
