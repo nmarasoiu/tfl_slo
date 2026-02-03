@@ -25,7 +25,6 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
-import static org.apache.pekko.pattern.Patterns.retry;
 
 /**
  * Client for TfL API using Pekko HTTP (non-blocking).
@@ -172,28 +171,97 @@ public class TflApiClient implements TflClient {
 
     /**
      * Wrap operation with selective retry - only retries on retryable errors.
+     * Respects Retry-After header from server when present.
      *
      * Retryable: 408, 429, 5xx, network errors (IOException)
      * Not retryable: 4xx client errors
      */
     private CompletionStage<TubeStatus> withRetry(
             Callable<CompletionStage<TubeStatus>> operation) {
-        // BiPredicate<Result, Throwable> - returns true to retry
-        java.util.function.BiPredicate<TubeStatus, Throwable> shouldRetry =
-                (result, error) -> error != null && isRetryableException(error);
+        return retryWithBackoff(operation, 0);
+    }
 
-        return retry(
-                operation,
-                shouldRetry,
-                maxRetries,
-                retryDelay,
-                system.classicSystem().scheduler(),
-                system.executionContext()
-        ).whenComplete((result, error) -> {
-            if (error != null) {
-                log.warn("All {} retry attempts exhausted: {}", maxRetries, error.getMessage());
+    /**
+     * Recursive retry with exponential backoff and Retry-After support.
+     */
+    private CompletionStage<TubeStatus> retryWithBackoff(
+            Callable<CompletionStage<TubeStatus>> operation, int attempt) {
+
+        CompletionStage<TubeStatus> result;
+        try {
+            result = operation.call();
+        } catch (Exception e) {
+            result = CompletableFuture.failedFuture(e);
+        }
+
+        return result.handle((success, error) -> {
+            if (error == null) {
+                return CompletableFuture.completedFuture(success);
             }
-        });
+
+            if (attempt >= maxRetries || !isRetryableException(error)) {
+                if (attempt >= maxRetries) {
+                    log.warn("All {} retry attempts exhausted: {}", maxRetries, error.getMessage());
+                }
+                return CompletableFuture.<TubeStatus>failedFuture(error);
+            }
+
+            // Determine delay: use Retry-After if present, otherwise exponential backoff
+            Duration delay = getRetryDelay(error, attempt);
+            log.info("Retry attempt {} after {} ms", attempt + 1, delay.toMillis());
+
+            // Schedule retry after delay
+            CompletableFuture<TubeStatus> delayed = new CompletableFuture<>();
+            system.classicSystem().scheduler().scheduleOnce(
+                    delay,
+                    () -> retryWithBackoff(operation, attempt + 1)
+                            .whenComplete((r, e) -> {
+                                if (e != null) {
+                                    delayed.completeExceptionally(e);
+                                } else {
+                                    delayed.complete(r);
+                                }
+                            }),
+                    system.executionContext()
+            );
+            return delayed;
+        }).thenCompose(f -> f);
+    }
+
+    /**
+     * Calculate retry delay: prefer server's Retry-After, fall back to exponential backoff.
+     * Always adds jitter to prevent thundering herd when multiple nodes retry.
+     */
+    private Duration getRetryDelay(Throwable error, int attempt) {
+        double jitterFactor = 0.25;
+
+        // Check for Retry-After from server
+        Throwable cause = error;
+        if (error instanceof java.util.concurrent.CompletionException && error.getCause() != null) {
+            cause = error.getCause();
+        }
+
+        if (cause instanceof HttpStatusException httpEx && httpEx.getRetryAfter() != null) {
+            Duration serverDelay = httpEx.getRetryAfter();
+            // Add jitter on TOP of Retry-After to prevent thundering herd
+            // If server says 60s, we wait 60s + random(0, 15s) = 60-75s
+            long jitterMs = (long) (serverDelay.toMillis() * jitterFactor * Math.random());
+            Duration withJitter = serverDelay.plusMillis(jitterMs);
+            log.debug("Using server Retry-After: {}s + {}ms jitter = {}ms total",
+                    serverDelay.toSeconds(), jitterMs, withJitter.toMillis());
+            return withJitter;
+        }
+
+        // Exponential backoff with jitter: baseDelay * 2^attempt * (1 ± jitter)
+        long baseMs = retryDelay.toMillis();
+        long backoffMs = baseMs * (1L << attempt); // 2^attempt
+        double jitter = 1.0 + (Math.random() * 2 - 1) * jitterFactor; // 0.75 to 1.25
+        long delayMs = (long) (backoffMs * jitter);
+
+        // Cap at 30 seconds
+        delayMs = Math.min(delayMs, 30_000);
+
+        return Duration.ofMillis(delayMs);
     }
 
     /**
@@ -271,8 +339,15 @@ public class TflApiClient implements TflClient {
 
             // Determine if this error is retryable
             boolean retryable = isRetryableStatus(status);
+
+            // Extract Retry-After header if present (for 429 responses)
+            Duration retryAfter = parseRetryAfterHeader(response);
+            if (retryAfter != null) {
+                log.info("TfL returned 429 with Retry-After: {} seconds", retryAfter.toSeconds());
+            }
+
             return CompletableFuture.failedFuture(
-                    new HttpStatusException(status, "TfL API returned " + status, retryable));
+                    new HttpStatusException(status, "TfL API returned " + status, retryable, retryAfter));
         }
 
         // Collect response body
@@ -338,20 +413,48 @@ public class TflApiClient implements TflClient {
     }
 
     /**
+     * Parse the Retry-After header from an HTTP response.
+     *
+     * Handles numeric format: "Retry-After: 120" (seconds)
+     * HTTP-date format is not commonly used for rate limiting.
+     *
+     * @return Duration to wait, or null if header not present/parseable
+     */
+    private Duration parseRetryAfterHeader(HttpResponse response) {
+        return response.getHeader("Retry-After")
+                .map(header -> {
+                    try {
+                        long seconds = Long.parseLong(header.value().trim());
+                        return Duration.ofSeconds(seconds);
+                    } catch (NumberFormatException e) {
+                        log.debug("Retry-After header not numeric: {}", header.value());
+                        return null;
+                    }
+                })
+                .orElse(null);
+    }
+
+    /**
      * HTTP status exception for retry decisions.
      */
     public static class HttpStatusException extends RuntimeException {
         private final int statusCode;
         private final boolean retryable;
+        private final Duration retryAfter;
 
         public HttpStatusException(int statusCode, String message) {
-            this(statusCode, message, false);
+            this(statusCode, message, false, null);
         }
 
         public HttpStatusException(int statusCode, String message, boolean retryable) {
+            this(statusCode, message, retryable, null);
+        }
+
+        public HttpStatusException(int statusCode, String message, boolean retryable, Duration retryAfter) {
             super(message);
             this.statusCode = statusCode;
             this.retryable = retryable;
+            this.retryAfter = retryAfter;
         }
 
         public int getStatusCode() {
@@ -360,6 +463,13 @@ public class TflApiClient implements TflClient {
 
         public boolean isRetryable() {
             return retryable;
+        }
+
+        /**
+         * Returns the server-suggested retry delay (from Retry-After header), or null if not provided.
+         */
+        public Duration getRetryAfter() {
+            return retryAfter;
         }
     }
 }

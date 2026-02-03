@@ -328,11 +328,11 @@ Your SLO cannot exceed TfL's reliability (~99.5%). We target 99.9% because cachi
 | Feature | Why Not |
 |---------|---------|
 | Kubernetes deployment | Out of scope for 3h exercise |
-| Distributed tracing | Nice to have, not core |
-| Prometheus metrics | First priority for prod, but time constraint |
 | Historical estimation | Stretch goal |
 | TLS between nodes | Assume trusted network for exercise |
 | Persistent storage | Over-engineering for cache (see section 1) |
+
+**Note:** Prometheus metrics (`/metrics` endpoint) and OpenTelemetry tracing are implemented.
 
 ---
 

@@ -9,3 +9,6 @@ build/
 
 # OS
 .DS_Store
+
+# Confidential assignment materials
+private/
