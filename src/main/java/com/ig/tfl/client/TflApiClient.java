@@ -171,12 +171,20 @@ public class TflApiClient implements TflClient {
     }
 
     /**
-     * Wrap operation with Pekko's built-in retry.
+     * Wrap operation with selective retry - only retries on retryable errors.
+     *
+     * Retryable: 408, 429, 5xx, network errors (IOException)
+     * Not retryable: 4xx client errors
      */
     private CompletionStage<TubeStatus> withRetry(
             Callable<CompletionStage<TubeStatus>> operation) {
+        // BiPredicate<Result, Throwable> - returns true to retry
+        java.util.function.BiPredicate<TubeStatus, Throwable> shouldRetry =
+                (result, error) -> error != null && isRetryableException(error);
+
         return retry(
                 operation,
+                shouldRetry,
                 maxRetries,
                 retryDelay,
                 system.classicSystem().scheduler(),
@@ -186,6 +194,35 @@ public class TflApiClient implements TflClient {
                 log.warn("All {} retry attempts exhausted: {}", maxRetries, error.getMessage());
             }
         });
+    }
+
+    /**
+     * Determine if an exception should trigger a retry.
+     */
+    private boolean isRetryableException(Throwable t) {
+        // Unwrap CompletionException if present
+        Throwable cause = t;
+        if (t instanceof java.util.concurrent.CompletionException && t.getCause() != null) {
+            cause = t.getCause();
+        }
+
+        // HTTP errors with retryable flag
+        if (cause instanceof HttpStatusException httpEx) {
+            boolean retryable = httpEx.isRetryable();
+            if (!retryable) {
+                log.debug("Not retrying {} - client error", httpEx.getStatusCode());
+            }
+            return retryable;
+        }
+
+        // Network errors are always retryable
+        if (cause instanceof java.io.IOException) {
+            log.debug("Retrying on network error: {}", cause.getMessage());
+            return true;
+        }
+
+        // Default: don't retry unknown errors
+        return false;
     }
 
     // Internal fetch methods using Pekko HTTP
@@ -232,8 +269,10 @@ public class TflApiClient implements TflClient {
             // Drain the entity to free connection
             response.discardEntityBytes(materializer);
 
+            // Determine if this error is retryable
+            boolean retryable = isRetryableStatus(status);
             return CompletableFuture.failedFuture(
-                    new HttpStatusException(status, "TfL API returned " + status));
+                    new HttpStatusException(status, "TfL API returned " + status, retryable));
         }
 
         // Collect response body
@@ -287,18 +326,40 @@ public class TflApiClient implements TflClient {
     }
 
     /**
+     * Determine if an HTTP status code is retryable.
+     *
+     * Retryable: 408 (timeout), 429 (rate limit), 5xx (server errors)
+     * Not retryable: 4xx client errors (our bug or invalid request)
+     */
+    private boolean isRetryableStatus(int status) {
+        return status == 408    // Request Timeout
+            || status == 429    // Too Many Requests
+            || status >= 500;   // Server errors
+    }
+
+    /**
      * HTTP status exception for retry decisions.
      */
     public static class HttpStatusException extends RuntimeException {
         private final int statusCode;
+        private final boolean retryable;
 
         public HttpStatusException(int statusCode, String message) {
+            this(statusCode, message, false);
+        }
+
+        public HttpStatusException(int statusCode, String message, boolean retryable) {
             super(message);
             this.statusCode = statusCode;
+            this.retryable = retryable;
         }
 
         public int getStatusCode() {
             return statusCode;
+        }
+
+        public boolean isRetryable() {
+            return retryable;
         }
     }
 }

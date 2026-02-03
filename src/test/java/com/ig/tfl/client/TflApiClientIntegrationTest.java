@@ -203,4 +203,137 @@ class TflApiClientIntegrationTest {
                 .isInstanceOf(Exception.class);
     }
 
+    // =========================================================================
+    // Selective Retry Tests (ADR-006)
+    // =========================================================================
+
+    @Test
+    void doesNotRetryOn400BadRequest() {
+        wireMock.stubFor(get(urlPathEqualTo("/Line/Mode/tube/Status"))
+                .willReturn(badRequest()));
+
+        assertThatThrownBy(() ->
+                client.fetchAllLinesAsync().toCompletableFuture().join())
+                .isInstanceOf(CompletionException.class)
+                .hasCauseInstanceOf(TflApiClient.HttpStatusException.class);
+
+        // Should NOT retry - only 1 request made
+        wireMock.verify(1, getRequestedFor(urlPathEqualTo("/Line/Mode/tube/Status")));
+    }
+
+    @Test
+    void doesNotRetryOn404NotFound() {
+        wireMock.stubFor(get(urlPathEqualTo("/Line/Mode/tube/Status"))
+                .willReturn(notFound()));
+
+        assertThatThrownBy(() ->
+                client.fetchAllLinesAsync().toCompletableFuture().join())
+                .isInstanceOf(CompletionException.class)
+                .hasCauseInstanceOf(TflApiClient.HttpStatusException.class);
+
+        // Should NOT retry - only 1 request made
+        wireMock.verify(1, getRequestedFor(urlPathEqualTo("/Line/Mode/tube/Status")));
+    }
+
+    @Test
+    void doesNotRetryOn403Forbidden() {
+        wireMock.stubFor(get(urlPathEqualTo("/Line/Mode/tube/Status"))
+                .willReturn(forbidden()));
+
+        assertThatThrownBy(() ->
+                client.fetchAllLinesAsync().toCompletableFuture().join())
+                .isInstanceOf(CompletionException.class);
+
+        // Should NOT retry - only 1 request made
+        wireMock.verify(1, getRequestedFor(urlPathEqualTo("/Line/Mode/tube/Status")));
+    }
+
+    @Test
+    void retriesOn429TooManyRequests() {
+        // First request fails with 429
+        wireMock.stubFor(get(urlPathEqualTo("/Line/Mode/tube/Status"))
+                .inScenario("rate-limit-test")
+                .whenScenarioStateIs(Scenario.STARTED)
+                .willReturn(aResponse().withStatus(429))
+                .willSetStateTo("second-attempt"));
+
+        // Second request succeeds
+        wireMock.stubFor(get(urlPathEqualTo("/Line/Mode/tube/Status"))
+                .inScenario("rate-limit-test")
+                .whenScenarioStateIs("second-attempt")
+                .willReturn(okJson(sampleResponse)));
+
+        TubeStatus status = client.fetchAllLinesAsync()
+                .toCompletableFuture()
+                .join();
+
+        assertThat(status.lines()).isNotEmpty();
+
+        // Should have retried - 2 requests made
+        wireMock.verify(2, getRequestedFor(urlPathEqualTo("/Line/Mode/tube/Status")));
+    }
+
+    @Test
+    void retriesOn500InternalServerError() {
+        // First request fails with 500
+        wireMock.stubFor(get(urlPathEqualTo("/Line/Mode/tube/Status"))
+                .inScenario("server-error-test")
+                .whenScenarioStateIs(Scenario.STARTED)
+                .willReturn(serverError())
+                .willSetStateTo("second-attempt"));
+
+        // Second request succeeds
+        wireMock.stubFor(get(urlPathEqualTo("/Line/Mode/tube/Status"))
+                .inScenario("server-error-test")
+                .whenScenarioStateIs("second-attempt")
+                .willReturn(okJson(sampleResponse)));
+
+        TubeStatus status = client.fetchAllLinesAsync()
+                .toCompletableFuture()
+                .join();
+
+        assertThat(status.lines()).isNotEmpty();
+
+        // Should have retried - 2 requests made
+        wireMock.verify(2, getRequestedFor(urlPathEqualTo("/Line/Mode/tube/Status")));
+    }
+
+    @Test
+    void retriesOn502BadGateway() {
+        // First request fails with 502
+        wireMock.stubFor(get(urlPathEqualTo("/Line/Mode/tube/Status"))
+                .inScenario("bad-gateway-test")
+                .whenScenarioStateIs(Scenario.STARTED)
+                .willReturn(aResponse().withStatus(502))
+                .willSetStateTo("second-attempt"));
+
+        // Second request succeeds
+        wireMock.stubFor(get(urlPathEqualTo("/Line/Mode/tube/Status"))
+                .inScenario("bad-gateway-test")
+                .whenScenarioStateIs("second-attempt")
+                .willReturn(okJson(sampleResponse)));
+
+        TubeStatus status = client.fetchAllLinesAsync()
+                .toCompletableFuture()
+                .join();
+
+        assertThat(status.lines()).isNotEmpty();
+
+        // Should have retried - 2 requests made
+        wireMock.verify(2, getRequestedFor(urlPathEqualTo("/Line/Mode/tube/Status")));
+    }
+
+    @Test
+    void httpStatusExceptionContainsRetryableFlag() {
+        // 400 - not retryable
+        var clientError = new TflApiClient.HttpStatusException(400, "Bad Request", false);
+        assertThat(clientError.isRetryable()).isFalse();
+        assertThat(clientError.getStatusCode()).isEqualTo(400);
+
+        // 500 - retryable
+        var serverError = new TflApiClient.HttpStatusException(500, "Server Error", true);
+        assertThat(serverError.isRetryable()).isTrue();
+        assertThat(serverError.getStatusCode()).isEqualTo(500);
+    }
+
 }
