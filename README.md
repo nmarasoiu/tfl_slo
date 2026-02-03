@@ -151,8 +151,6 @@ src/main/java/com/ig/tfl/
 ├── model/
 │   └── TubeStatus.java          # Domain model
 └── resilience/
-    ├── CircuitBreaker.java      # Circuit breaker (5 failures → open, 30s recovery)
-    ├── RetryPolicy.java         # Exponential backoff with jitter
     └── RateLimiter.java         # Token bucket (100 req/min per IP)
 ```
 

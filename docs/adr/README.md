@@ -8,9 +8,10 @@ This directory contains Architecture Decision Records documenting key technical 
 |-----|-------|--------|------|
 | [ADR-001](ADR-001-ap-over-cp.md) | AP over CP Consistency Model | Accepted | 2026-02-03 |
 | [ADR-002](ADR-002-pekko-distributed-data.md) | Pekko Distributed Data over Redis/Hazelcast | Accepted | 2026-02-03 |
-| [ADR-003](ADR-003-manual-resilience-patterns.md) | Manual Resilience Patterns vs Pekko Built-ins | **Under Review** | 2026-02-03 |
+| [ADR-003](ADR-003-manual-resilience-patterns.md) | Manual Resilience Patterns vs Pekko Built-ins | Superseded | 2026-02-03 |
 | [ADR-004](ADR-004-no-leader-election.md) | No Leader Election | Accepted | 2026-02-03 |
 | [ADR-005](ADR-005-virtual-threads.md) | Virtual Threads (Not Using) | Accepted | 2026-02-03 |
+| [ADR-006](ADR-006-selective-retry-policy.md) | Selective Retry Policy | Accepted | 2026-02-03 |
 
 ## ADR Format
 

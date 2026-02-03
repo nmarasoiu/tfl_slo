@@ -48,10 +48,10 @@ maintainers:
 ### values.yaml (defaults)
 
 ```yaml
-# Image
+# Image - always use immutable SHA-based tags, never 'latest'
 image:
   repository: ghcr.io/ig/tfl-status
-  tag: latest
+  tag: "abc1234"  # Replace with actual git SHA - CI updates this
   pullPolicy: IfNotPresent
 
 # Replicas
@@ -385,10 +385,9 @@ jobs:
         run: docker build -t ghcr.io/ig/tfl-status:${{ github.sha }} .
       - name: Push image
         run: |
+          # Only push SHA-tagged images for immutability - avoid 'latest'
           echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
           docker push ghcr.io/ig/tfl-status:${{ github.sha }}
-          docker tag ghcr.io/ig/tfl-status:${{ github.sha }} ghcr.io/ig/tfl-status:latest
-          docker push ghcr.io/ig/tfl-status:latest
 
   update-gitops:
     needs: build

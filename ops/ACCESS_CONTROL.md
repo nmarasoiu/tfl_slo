@@ -123,7 +123,7 @@ spec:
     spec:
       containers:
         - name: cloudflared
-          image: cloudflare/cloudflared
+          image: cloudflare/cloudflared:2024.1.2  # Pin version for reproducibility
           args:
             - tunnel
             - --no-autoupdate
@@ -185,7 +185,7 @@ spec:
         - name: tfl-status
           # ... app container
         - name: tailscale
-          image: tailscale/tailscale
+          image: tailscale/tailscale:v1.58.2  # Pin version for reproducibility
           env:
             - name: TS_AUTHKEY
               valueFrom:

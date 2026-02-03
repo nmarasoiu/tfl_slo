@@ -583,8 +583,8 @@ securityContext:
 ### Image Security
 
 ```dockerfile
-# Use distroless or minimal base
-FROM eclipse-temurin:21-jre-alpine
+# Use distroless or minimal base with pinned version
+FROM eclipse-temurin:21.0.2_13-jre-alpine3.19
 
 # Don't run as root
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
@@ -599,8 +599,25 @@ ENTRYPOINT ["java", "-jar", "app.jar"]
 
 ### Vulnerability Scanning
 
+**In practice, scan both Java packages and Docker containers:**
+
+| Scan Target | Tool | When |
+|-------------|------|------|
+| Java dependencies | OWASP Dependency-Check, Snyk | CI build |
+| Docker images | Trivy, Grype | CI build + registry |
+| Base images | Trivy | Nightly scan |
+| Container runtime | Falco | Production |
+
 ```yaml
-# GitHub Actions step
+# GitHub Actions - comprehensive scanning
+- name: Scan Java dependencies
+  uses: dependency-check/Dependency-Check_Action@main
+  with:
+    project: 'tfl-status'
+    path: '.'
+    format: 'HTML'
+    args: '--failOnCVSS 7'
+
 - name: Scan image for vulnerabilities
   uses: aquasecurity/trivy-action@master
   with:
@@ -608,7 +625,32 @@ ENTRYPOINT ["java", "-jar", "app.jar"]
     format: 'sarif'
     output: 'trivy-results.sarif'
     severity: 'CRITICAL,HIGH'
+
+- name: Scan for secrets in image
+  uses: aquasecurity/trivy-action@master
+  with:
+    image-ref: ghcr.io/ig/tfl-status:${{ github.sha }}
+    scan-type: 'secret'
 ```
+
+### Image Versioning (Reproducibility)
+
+**Always use fixed, immutable image tags—never `latest`.**
+
+| Image Reference | Status |
+|-----------------|--------|
+| `eclipse-temurin:21-jre-alpine` | **Bad** - alpine version floats |
+| `eclipse-temurin:21.0.2_13-jre-alpine3.19` | **Good** - fully pinned |
+| `cloudflare/cloudflared:latest` | **Bad** - unpredictable |
+| `cloudflare/cloudflared:2024.1.2` | **Good** - immutable |
+| `ghcr.io/ig/tfl-status:latest` | **Bad** - mutable in registry |
+| `ghcr.io/ig/tfl-status:abc123` | **Good** - SHA-based |
+
+**Why this matters:**
+- Reproducible builds and deployments
+- Known vulnerability surface (can scan specific version)
+- Rollback to exact previous state
+- Audit trail of what ran when
 
 ---
 

@@ -104,7 +104,7 @@ void retriesOn503ThenSucceeds() {
 
 ## 2. Observability
 
-### Metrics (Prometheus) - TODO
+### Metrics (Prometheus)
 
 ```java
 // Request metrics
@@ -139,7 +139,7 @@ Gauge.builder("circuit_breaker_state", () -> circuitBreaker.getState().ordinal()
 
 Key log events: circuit breaker state changes, TfL fetch success/failure, CRDT updates, rate limiting.
 
-### Distributed Tracing (OpenTelemetry) - TODO
+### Distributed Tracing (OpenTelemetry)
 
 Trace correlation: Request ID propagated through all components.
 
@@ -150,7 +150,8 @@ Trace correlation: Request ID propagated through all components.
 ### Containerization
 
 ```dockerfile
-FROM eclipse-temurin:21-jre-alpine
+# Pin base image version for reproducibility - never use floating tags
+FROM eclipse-temurin:21.0.2_13-jre-alpine3.19
 COPY build/libs/tfl-slo-*.jar app.jar
 EXPOSE 8080 2551
 ENTRYPOINT ["java", "-jar", "app.jar"]
@@ -169,7 +170,7 @@ spec:
     spec:
       containers:
       - name: tfl-status
-        image: tfl-status:latest
+        image: tfl-status:abc1234  # Use git SHA, never 'latest'
         ports:
         - containerPort: 8080  # HTTP
         - containerPort: 2551  # Pekko cluster
@@ -241,7 +242,7 @@ pekko.management {
 | Circuit breaker open | 30s | CircuitBreaker |
 | CRDT read | 5s | TubeStatusReplicator |
 
-### Additional Resilience (TODO)
+### Additional Resilience
 
 | Pattern | Purpose |
 |---------|---------|
@@ -260,7 +261,7 @@ pekko.management {
 
 ---
 
-## 6. Runbooks (TODO)
+## 6. Runbooks
 
 | Runbook | Trigger | Actions |
 |---------|---------|---------|

@@ -169,31 +169,17 @@ pekko.cluster {
 
 ## Layer 5: Resilience
 
-### Current State: Manual Implementation
+### Current State: Pekko Built-ins + Manual Rate Limiter
 
-We manually implemented:
-- `CircuitBreaker.java` (~140 lines)
-- `RetryPolicy.java` (~226 lines)
-- `RateLimiter.java` (~176 lines)
+| Pattern | Implementation | Notes |
+|---------|---------------|-------|
+| Circuit Breaker | `org.apache.pekko.pattern.CircuitBreaker` | Scheduler-integrated, telemetry hooks |
+| Retry | `org.apache.pekko.pattern.Patterns.retry()` | Built-in backoff support |
+| Rate Limiter | `RateLimiter.java` (manual) | Per-client limiting (no Pekko equivalent) |
+| Timeout | Ask timeout | Native |
+| Bulkhead | Actor isolation | Natural in actor model |
 
-### What Pekko Offers Built-in
-
-| Pattern | Pekko Built-in | We Use? |
-|---------|---------------|---------|
-| Circuit Breaker | `org.apache.pekko.pattern.CircuitBreaker` | No (manual) |
-| Retry | `org.apache.pekko.pattern.RetrySupport` | No (manual) |
-| Rate Limiter | Streams throttle only | Manual (per-client) |
-| Timeout | Ask timeout | Yes |
-| Bulkhead | Actor isolation | Yes (natural) |
-
-### Recommendation
-
-**Should migrate to Pekko built-ins:**
-- CircuitBreaker → `org.apache.pekko.pattern.CircuitBreaker`
-- RetryPolicy → `org.apache.pekko.pattern.RetrySupport`
-- RateLimiter → Keep manual (Pekko doesn't have per-client limiter)
-
-See [ADR-003](adr/ADR-003-manual-resilience-patterns.md) for full analysis.
+See [ADR-003](adr/ADR-003-manual-resilience-patterns.md) for decision history.
 
 ---
 
@@ -226,10 +212,8 @@ We use manual instrumentation instead - simpler, sufficient for our needs.
 | Actors | Pekko Typed | Yes | Type-safe, supervision |
 | Distribution | Pekko DD | Yes | CRDT semantics |
 | Cluster | Pekko Cluster | Yes | Membership, SBR |
-| Resilience | Manual | **No** | Should use Pekko built-ins |
+| Resilience | Pekko built-ins | Yes | CircuitBreaker, RetrySupport |
 | Observability | Micrometer/OTel | Yes | Standard tools |
-
-**Main finding:** We're using Pekko correctly at most layers, but over-engineered the resilience layer by not using Pekko's built-in CircuitBreaker and RetrySupport.
 
 ---
 
@@ -244,8 +228,5 @@ We use manual instrumentation instead - simpler, sufficient for our needs.
 3. **"Why not Kubernetes for service discovery?"**
    - Kubernetes handles infrastructure; Pekko Cluster handles application-level coordination and CRDT replication.
 
-4. **"Is manual resilience code over-engineering?"**
-   - Yes, for production. Pekko has built-in CircuitBreaker and RetrySupport. The manual code demonstrates understanding but should be migrated.
-
-5. **"What would you change?"**
-   - Replace manual CircuitBreaker/RetryPolicy with Pekko built-ins (save ~366 lines, gain scheduler integration and telemetry).
+4. **"Why use Pekko's built-in CircuitBreaker?"**
+   - Scheduler-integrated, telemetry hooks, well-tested. Manual rate limiter remains for per-client limiting (no Pekko equivalent).
