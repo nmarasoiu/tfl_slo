@@ -124,23 +124,6 @@ This outperforms pure LRU, LFU, and even ARC on mixed workloads.
 
 ---
 
-## Could We CRDT-Replicate Eviction Metadata?
-
-Theoretically, to get distributed W-TinyLFU:
-- Frequency counts → G-Counter or PN-Counter CRDT
-- Recency lists → LWW-Register per entry with access timestamps
-- Cache entries → LWWMap
-
-**Challenges:**
-- Each node has different access patterns → merge semantics unclear (sum frequencies? max?)
-- Count-Min Sketch (TinyLFU's core) has no obvious CRDT-friendly merge
-- Hill-climbing adapts to *local* hit rates; global adaptation needs consensus
-- Eviction decisions need coordination or accept inconsistency (some nodes evict, others don't)
-
-**Reality:** Distributed caches with smart eviction (Redis Cluster, Memcached) use consistent hashing or centralized coordination, not pure CRDTs. A CRDT-native W-TinyLFU would be research-paper territory.
-
----
-
 ## Recommendation
 
 **For this exercise:** Don't cache date ranges. The traffic pattern doesn't justify the complexity.
