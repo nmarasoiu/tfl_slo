@@ -16,7 +16,12 @@ import org.apache.pekko.http.javadsl.ServerBinding;
 import org.apache.pekko.http.javadsl.model.HttpRequest;
 import org.apache.pekko.http.javadsl.model.HttpResponse;
 import org.apache.pekko.stream.Materializer;
-import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Tag;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.Timeout;
 
 import java.time.Duration;
 import java.util.Set;
@@ -26,13 +31,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
 /**
- * Full service E2E smoke test.
+ * Full service E2E smoke test - ONE integrated test with real TfL.
  *
- * Starts the complete service with real TfL API client and verifies
- * the service correctly fetches, caches, and serves tube status data.
+ * Purpose: Verify the complete service stack works end-to-end:
+ *   Client -> HTTP -> Routes -> Replicator -> TflGateway -> TfL API
  *
- * Requires network access to api.tfl.gov.uk.
- * Run with: ./gradlew test --tests "*ServiceSmokeTest*"
+ * This is intentionally a SINGLE test to minimize real TfL API calls.
+ * Detailed endpoint testing is done in TubeStatusRoutesTest with mocks.
+ *
+ * Run with: ./gradlew e2eTest
  */
 @Tag("e2e")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -55,86 +62,86 @@ class ServiceSmokeTest {
 
     @BeforeAll
     void setupClass() throws Exception {
+        // Create test actor system with cluster disabled
         Config config = ConfigFactory.parseString("""
                 pekko {
                     loglevel = "INFO"
-                    actor {
-                        provider = "cluster"
-                        allow-java-serialization = on
+                    actor.provider = "local"
+                    cluster.enabled = false
+                }
+                tfl {
+                    node-id = "smoke-test-node"
+                    http {
+                        port = 0
+                        ask-timeout = 30s
+                        response-timeout = 30s
                     }
-                    remote.artery {
-                        canonical.hostname = "127.0.0.1"
-                        canonical.port = 0
+                    refresh {
+                        interval = 60s
+                        recent-enough-threshold = 30s
+                        background-refresh-threshold = 20s
                     }
-                    cluster {
-                        seed-nodes = []
-                        downing-provider-class = "org.apache.pekko.cluster.sbr.SplitBrainResolverProvider"
+                    rate-limit.requests-per-minute = 100
+                    circuit-breaker {
+                        failure-threshold = 5
+                        open-duration = 30s
+                    }
+                    retry {
+                        max-retries = 2
+                        base-delay = 500ms
                     }
                 }
-                """).resolve();
+                """).withFallback(ConfigFactory.load()).resolve();
 
-        testKit = ActorTestKit.create("e2e-smoke-test", config);
+        testKit = ActorTestKit.create("service-smoke-test", config);
+        objectMapper = new ObjectMapper();
 
-        // Join cluster (single node for test)
-        org.apache.pekko.cluster.typed.Cluster.get(testKit.system()).manager()
-                .tell(org.apache.pekko.cluster.typed.Join.create(
-                        org.apache.pekko.cluster.typed.Cluster.get(testKit.system())
-                                .selfMember().address()));
+        // Create metrics
+        Metrics metrics = new Metrics();
 
-        // Create REAL TfL API client (not mocked!)
-        TflApiClient tflClient = new TflApiClient(testKit.system(), "e2e-test-node");
+        // Create REAL TfL API client (this is the e2e part)
+        TflApiClient tflApiClient = new TflApiClient(
+                testKit.system(),
+                "smoke-test-node",
+                "https://api.tfl.gov.uk"
+        );
 
-        // Create TflGateway actor wrapping the real client
-        tflGateway = testKit.spawn(
-                TflGateway.create(tflClient),
-                "e2e-tfl-gateway");
+        // Create TflGateway actor
+        tflGateway = testKit.spawn(TflGateway.create(tflApiClient), "tfl-gateway");
 
-        // Create replicator with reasonable refresh interval
+        // Create Replicator actor
         replicator = testKit.spawn(
                 TubeStatusReplicator.create(
                         tflGateway,
-                        "e2e-test-node",
-                        Duration.ofSeconds(30),  // refresh interval
-                        Duration.ofSeconds(5)),  // recent enough threshold
-                "e2e-replicator");
+                        "smoke-test-node",
+                        Duration.ofSeconds(60),
+                        Duration.ofSeconds(30),
+                        Duration.ofSeconds(20)
+                ),
+                "tube-status-replicator"
+        );
 
-        // Wait for initial data from real TfL API
-        System.out.println("Waiting for initial TfL data fetch...");
-        await().atMost(30, TimeUnit.SECONDS)
-                .pollInterval(1, TimeUnit.SECONDS)
-                .until(() -> {
-                    var probe = testKit.<TubeStatusReplicator.StatusResponse>createTestProbe();
-                    replicator.tell(new TubeStatusReplicator.GetStatus(probe.ref()));
-                    var response = probe.receiveMessage(Duration.ofSeconds(5));
-                    boolean hasData = response.status() != null && !response.status().lines().isEmpty();
-                    if (hasData) {
-                        System.out.println("Got " + response.status().lines().size() + " tube lines from TfL");
-                    }
-                    return hasData;
-                });
-
-        // Start HTTP server
+        // Create and bind HTTP server
         TubeStatusRoutes routes = new TubeStatusRoutes(
-                testKit.system(),
-                replicator,
-                tflGateway,
-                new Metrics(),
-                100,  // requests per minute
-                Duration.ofSeconds(5));  // ask timeout
+                testKit.system(), replicator, tflGateway, metrics);
 
         http = Http.get(testKit.system());
         materializer = Materializer.createMaterializer(testKit.system());
-        objectMapper = new ObjectMapper();
 
-        serverBinding = http
-                .newServerAt("127.0.0.1", 0)
+        serverBinding = http.newServerAt("localhost", 0)
                 .bind(routes.routes())
                 .toCompletableFuture()
                 .get(10, TimeUnit.SECONDS);
 
-        int port = serverBinding.localAddress().getPort();
-        baseUrl = "http://127.0.0.1:" + port;
-        System.out.println("E2E test server started at " + baseUrl);
+        baseUrl = "http://localhost:" + serverBinding.localAddress().getPort();
+
+        // Wait for service to fetch initial data from TfL
+        await().atMost(30, TimeUnit.SECONDS).untilAsserted(() -> {
+            HttpResponse response = http.singleRequest(HttpRequest.create(baseUrl + "/api/health/ready"))
+                    .toCompletableFuture()
+                    .get(5, TimeUnit.SECONDS);
+            assertThat(response.status().intValue()).isEqualTo(200);
+        });
     }
 
     @AfterAll
@@ -147,157 +154,78 @@ class ServiceSmokeTest {
         }
     }
 
+    /**
+     * Single comprehensive E2E test that verifies:
+     * 1. Service starts and connects to real TfL API
+     * 2. Fetches and caches tube status data
+     * 3. Serves data through HTTP endpoints
+     * 4. Health checks pass
+     * 5. Metrics are available
+     *
+     * This is ONE test to minimize TfL API calls.
+     * Detailed endpoint behavior is tested in TubeStatusRoutesTest with mocks.
+     */
     @Test
-    @Timeout(value = 30, unit = TimeUnit.SECONDS)
-    void service_getAllStatus_returnsRealTubeData() throws Exception {
-        HttpResponse response = get("/api/v1/tube/status");
-        assertThat(response.status().intValue()).isEqualTo(200);
+    @Timeout(value = 60, unit = TimeUnit.SECONDS)
+    void fullServiceStack_worksEndToEnd() throws Exception {
+        // 1. Verify health endpoints
+        HttpResponse liveResponse = http.singleRequest(HttpRequest.create(baseUrl + "/api/health/live"))
+                .toCompletableFuture()
+                .get(5, TimeUnit.SECONDS);
+        assertThat(liveResponse.status().intValue()).isEqualTo(200);
 
-        String body = getBody(response);
-        JsonNode json = objectMapper.readTree(body);
+        HttpResponse readyResponse = http.singleRequest(HttpRequest.create(baseUrl + "/api/health/ready"))
+                .toCompletableFuture()
+                .get(5, TimeUnit.SECONDS);
+        assertThat(readyResponse.status().intValue()).isEqualTo(200);
 
-        // Verify structure
-        assertThat(json.has("lines")).isTrue();
-        assertThat(json.has("meta")).isTrue();
+        // 2. Verify metrics endpoint
+        HttpResponse metricsResponse = http.singleRequest(HttpRequest.create(baseUrl + "/metrics"))
+                .toCompletableFuture()
+                .get(5, TimeUnit.SECONDS);
+        assertThat(metricsResponse.status().intValue()).isEqualTo(200);
 
-        // Verify we have all tube lines
-        JsonNode lines = json.get("lines");
+        // 3. Verify tube status endpoint returns real data
+        HttpResponse statusResponse = http.singleRequest(HttpRequest.create(baseUrl + "/api/v1/tube/status"))
+                .toCompletableFuture()
+                .get(5, TimeUnit.SECONDS);
+        assertThat(statusResponse.status().intValue()).isEqualTo(200);
+
+        String body = statusResponse.entity()
+                .toStrict(5000, materializer)
+                .toCompletableFuture()
+                .get(5, TimeUnit.SECONDS)
+                .getData()
+                .utf8String();
+
+        JsonNode response = objectMapper.readTree(body);
+
+        // Verify response structure
+        assertThat(response.has("lines")).isTrue();
+        assertThat(response.has("meta")).isTrue();
+
+        JsonNode lines = response.get("lines");
+        assertThat(lines.isArray()).isTrue();
         assertThat(lines.size()).isGreaterThanOrEqualTo(11);
 
-        // Verify expected lines are present
+        // Verify all expected tube lines are present
         Set<String> returnedLineIds = new java.util.HashSet<>();
         for (JsonNode line : lines) {
             returnedLineIds.add(line.get("id").asText());
+
+            // Verify line structure
+            assertThat(line.has("id")).isTrue();
+            assertThat(line.has("name")).isTrue();
+            assertThat(line.has("status")).isTrue();
         }
         assertThat(returnedLineIds).containsAll(EXPECTED_TUBE_LINES);
 
-        // Verify meta has expected fields
-        JsonNode meta = json.get("meta");
+        // Verify meta contains freshness info
+        JsonNode meta = response.get("meta");
         assertThat(meta.has("queriedAt")).isTrue();
-        assertThat(meta.has("queriedBy")).isTrue();
         assertThat(meta.has("ageMs")).isTrue();
-        assertThat(meta.get("queriedBy").asText()).isEqualTo("e2e-test-node");
+        assertThat(meta.get("ageMs").asLong()).isLessThan(60000); // Less than 60s old
 
-        System.out.println("Service returned " + lines.size() + " tube lines, data age: " +
-                meta.get("ageMs").asLong() + "ms");
-    }
-
-    @Test
-    @Timeout(value = 30, unit = TimeUnit.SECONDS)
-    void service_getSingleLine_returnsSpecificLine() throws Exception {
-        HttpResponse response = get("/api/v1/tube/central/status");
-        assertThat(response.status().intValue()).isEqualTo(200);
-
-        String body = getBody(response);
-        JsonNode json = objectMapper.readTree(body);
-
-        JsonNode lines = json.get("lines");
-        assertThat(lines.size()).isEqualTo(1);
-        assertThat(lines.get(0).get("id").asText()).isEqualTo("central");
-        assertThat(lines.get(0).get("name").asText()).isEqualTo("Central");
-        assertThat(lines.get(0).has("status")).isTrue();
-
-        String status = lines.get(0).get("status").asText();
-        System.out.println("Central line status: " + status);
-    }
-
-    @Test
-    @Timeout(value = 30, unit = TimeUnit.SECONDS)
-    void service_getDisruptions_returnsOnlyDisruptedLines() throws Exception {
-        HttpResponse response = get("/api/v1/tube/disruptions");
-        assertThat(response.status().intValue()).isEqualTo(200);
-
-        String body = getBody(response);
-        JsonNode json = objectMapper.readTree(body);
-
-        JsonNode lines = json.get("lines");
-        // May be 0 if no disruptions currently
-        System.out.println("Currently " + lines.size() + " lines with unplanned disruptions");
-
-        // If there are disruptions, verify they're unplanned
-        for (JsonNode line : lines) {
-            JsonNode disruptions = line.get("disruptions");
-            if (disruptions != null && disruptions.isArray()) {
-                for (JsonNode disruption : disruptions) {
-                    // At least one should be unplanned (isPlanned = false)
-                    if (!disruption.get("isPlanned").asBoolean()) {
-                        System.out.println("  - " + line.get("name").asText() + ": " +
-                                disruption.get("description").asText());
-                    }
-                }
-            }
-        }
-    }
-
-    @Test
-    @Timeout(value = 30, unit = TimeUnit.SECONDS)
-    void service_healthReady_returnsReadyWithData() throws Exception {
-        HttpResponse response = get("/api/health/ready");
-        assertThat(response.status().intValue()).isEqualTo(200);
-
-        String body = getBody(response);
-        JsonNode json = objectMapper.readTree(body);
-
-        assertThat(json.get("status").asText()).isEqualTo("ready");
-        assertThat(json.get("circuit").asText()).isEqualTo("CLOSED");
-        assertThat(json.get("dataAgeMs").asLong()).isGreaterThanOrEqualTo(0);
-
-        System.out.println("Service ready, circuit: " + json.get("circuit").asText() +
-                ", data age: " + json.get("dataAgeMs").asLong() + "ms");
-    }
-
-    @Test
-    @Timeout(value = 30, unit = TimeUnit.SECONDS)
-    void service_healthLive_alwaysReturnsOk() throws Exception {
-        HttpResponse response = get("/api/health/live");
-        assertThat(response.status().intValue()).isEqualTo(200);
-    }
-
-    @Test
-    @Timeout(value = 30, unit = TimeUnit.SECONDS)
-    void service_withMaxAgeMs_respectsFreshnessRequirement() throws Exception {
-        // Request with very high maxAgeMs - should return cached data immediately
-        HttpResponse response = get("/api/v1/tube/status?maxAgeMs=3600000");
-        assertThat(response.status().intValue()).isEqualTo(200);
-
-        String body = getBody(response);
-        JsonNode json = objectMapper.readTree(body);
-        assertThat(json.get("lines").size()).isGreaterThanOrEqualTo(11);
-
-        // Should not have stale header since we're within maxAgeMs
-        assertThat(response.getHeader("X-Data-Stale")).isEmpty();
-    }
-
-    @Test
-    @Timeout(value = 60, unit = TimeUnit.SECONDS)
-    void service_withMaxAgeMsZero_fetchesFreshFromTfl() throws Exception {
-        // Request with maxAgeMs=0 forces a fresh TfL fetch
-        HttpResponse response = get("/api/v1/tube/status?maxAgeMs=0");
-        assertThat(response.status().intValue()).isEqualTo(200);
-
-        String body = getBody(response);
-        JsonNode json = objectMapper.readTree(body);
-        assertThat(json.get("lines").size()).isGreaterThanOrEqualTo(11);
-
-        // Data should be very fresh (just fetched)
-        long ageMs = json.get("meta").get("ageMs").asLong();
-        System.out.println("Fresh fetch returned data with age: " + ageMs + "ms");
-        // Allow some tolerance for test execution time
-        assertThat(ageMs).isLessThan(5000);
-    }
-
-    private HttpResponse get(String path) throws Exception {
-        return http.singleRequest(HttpRequest.GET(baseUrl + path))
-                .toCompletableFuture()
-                .get(10, TimeUnit.SECONDS);
-    }
-
-    private String getBody(HttpResponse response) throws Exception {
-        return response.entity()
-                .toStrict(10000, materializer)
-                .toCompletableFuture()
-                .get(10, TimeUnit.SECONDS)
-                .getData()
-                .utf8String();
+        System.out.println("Full service E2E smoke test passed - " + lines.size() + " lines returned");
     }
 }
