@@ -147,27 +147,6 @@ Hash "tfl-poll" to a node, only that node polls.
 
 ---
 
-## Interview Answer
-
-> "Why no leader election for polling TfL?"
-
-**Short answer:** "Leader election adds availability risk (election delays) and complexity (consensus) to save ~4 requests/minute to an API with a 500 req/min limit. The failure mode without a leader (duplicate polling) is negligible; the failure mode with a leader (unavailability during election) is worse."
-
-**Follow-up - "Doesn't duplicate polling waste resources?"**
-
-"We're talking 6 req/min vs 2 req/min against a 500 req/min rate limit. The cost is ~0.8% of our quota. The benefit of leader election - slightly fewer requests - doesn't justify the complexity and availability risk."
-
-**Follow-up - "What if you had 100 nodes?"**
-
-"At 100 nodes × 2 req/min = 200 req/min, we'd still be under the TfL limit but it would be worth adding coordination. Options:
-1. Simple: Randomly delay each node's poll (jitter spreads load)
-2. Medium: Consistent hashing - hash 'tfl-poll' to 3 nodes
-3. Complex: Cluster Singleton if we really needed exactly one poller
-
-But for 3-5 nodes, the complexity isn't justified."
-
----
-
 ## References
 
 - [Pekko Cluster Singleton](https://pekko.apache.org/docs/pekko/current/typed/cluster-singleton.html)

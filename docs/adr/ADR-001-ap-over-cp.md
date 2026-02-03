@@ -82,22 +82,6 @@ Specifically:
 
 ---
 
-## Interview Answer
-
-> "Why AP over CP?"
-
-**Short answer:** "Stale tube status is better than no tube status. Our users are traders checking their commute - they'd rather see '5 minutes ago: Good Service' than 'Service Unavailable'. The failure mode of AP (duplicate polling, stale reads) is acceptable; the failure mode of CP (unavailability) is not."
-
-**Follow-up - "What about consistency?"**
-
-"We use LWW-Register CRDT, so there's a well-defined merge rule. During normal operation, gossip converges in ~200ms. During partitions, both sides serve their local cache. After healing, the latest write wins. For ephemeral cache data with minute-level freshness requirements, this is fine."
-
-**Follow-up - "What if clocks are skewed?"**
-
-"LWW does depend on timestamps, but modern NTP keeps clocks within milliseconds. Our data freshness is measured in seconds to minutes. A 100ms clock skew affecting a 30-second cache refresh is noise. If we had stricter requirements, we'd use vector clocks or a different CRDT."
-
----
-
 ## References
 
 - [CAP Theorem](https://en.wikipedia.org/wiki/CAP_theorem)

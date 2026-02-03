@@ -56,36 +56,7 @@ Reasons:
 
 ---
 
-## When You WOULD Use Redis/Hazelcast Instead
-
-### Use Redis When:
-
-1. **Persistence required** - Data must survive restarts (AOF, RDB snapshots)
-2. **Large dataset** - Exceeds single-node memory
-3. **Complex data structures** - Lists, sorted sets, streams, pub/sub
-4. **Shared cache** - Multiple applications sharing same cache
-5. **Existing infrastructure** - Redis already deployed and managed
-
-### Use Hazelcast When:
-
-1. **Java-native preferred** - Cleaner API for Java developers
-2. **Near-cache needed** - Local + remote cache tiers
-3. **SQL-like queries** - Need to query by predicates
-4. **Existing Hazelcast infrastructure** - Already deployed
-
-### Our Situation:
-
-- Small dataset (KB, not GB)
-- Ephemeral data (re-fetchable from TfL)
-- Single application (not shared)
-- No existing cache infrastructure
-- Already using Pekko
-
-**Conclusion:** Pekko DD is the right fit.
-
----
-
-## Alternatives in Detail
+## Alternatives Considered
 
 ### Redis
 
@@ -133,22 +104,6 @@ Reasons:
 - No persistence
 
 **Rejected because:** No replication means no distributed cache. Each node would have its own cache, defeating the purpose.
-
----
-
-## Interview Answer
-
-> "Why not Redis?"
-
-**Short answer:** "We're already using Pekko actors and cluster. Pekko Distributed Data gives us a distributed cache with CRDT semantics, zero external dependencies, and native integration with our actor model. For a small, ephemeral cache (11 tube lines), adding Redis would be operational complexity without benefit."
-
-**Follow-up - "But Redis is proven at scale"**
-
-"Absolutely, and if we were caching millions of items, needed persistence, or had multiple services sharing a cache, Redis would be the right choice. Our dataset is ~11KB and can be re-fetched from TfL anytime. The trade-offs favor embedded over external for this use case."
-
-**Follow-up - "What if you needed to scale?"**
-
-"Pekko DD scales horizontally - add more nodes, gossip replicates automatically. For our dataset, the limit is number of cluster nodes (overhead per node), not data size. If we hit that limit (unlikely), we'd revisit external cache. Build for today's requirements, not hypothetical future ones."
 
 ---
 
