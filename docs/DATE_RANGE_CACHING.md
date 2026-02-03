@@ -90,37 +90,7 @@ Centralized cache cluster, nodes query it before TfL.
 
 ### Option D: Hybrid (Local + CRDT for Hot Ranges)
 
-```
-1. Local Caffeine for all date ranges (fast, bounded)
-2. CRDT replication only for "hot" ranges (accessed N times in M minutes)
-3. On node startup, populate local cache from CRDT hot set
-```
-
-**Pros:**
-- Best of both: local speed + distributed resilience for hot data
-- Bounded memory via local eviction
-- Failover gets hot data from peers
-
-**Cons:**
-- Significant complexity
-- Need to define "hot" threshold
-- Two cache layers to reason about
-
----
-
-## Deep Dive: Caffeine's W-TinyLFU
-
-Caffeine uses **Window TinyLFU**, an adaptive policy similar to ZFS ARC:
-
-| Component | Size | Role |
-|-----------|------|------|
-| Admission window | ~1% | LRU for recency/burst patterns |
-| Main cache | ~99% | SLRU with frequency-based admission |
-| TinyLFU sketch | - | Compact frequency histogram (Count-Min Sketch) |
-
-**Adaptive hill-climbing:** The window/main ratio adjusts dynamically based on workload. If recency patterns dominate, window grows. If frequency patterns dominate, window shrinks.
-
-This outperforms pure LRU, LFU, and even ARC on mixed workloads.
+Local Caffeine for all ranges + CRDT replication for hot ranges only. Too complex for current traffic levels.
 
 ---
 
