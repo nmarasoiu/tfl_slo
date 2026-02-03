@@ -867,7 +867,213 @@ log.info("Auth: {} from {} - {}",
 
 ---
 
-## 10. Compliance Notes
+## 10. Access Control (AuthN/AuthZ)
+
+### Current State: No Auth
+
+The service currently has **no authentication**. Anyone who can reach the endpoint can use it.
+
+**Problem:** We don't want to be a public CDN for TfL data. Even though the data is public, we're paying for:
+- Compute resources
+- Network egress
+- TfL API quota (if we ever need authenticated access)
+
+### Options Comparison
+
+| Approach | Complexity | User Experience | Suitable For |
+|----------|------------|-----------------|--------------|
+| **Internal network only** | Low | Seamless (if on VPN) | Traditional enterprise |
+| **Cloudflare Access** | Low-Medium | Browser login, WARP client | Zero Trust, remote-first |
+| **Tailscale** | Low | Install client, then seamless | Small teams, dev-friendly |
+| **Google IAP** | Low-Medium | Google login | GCP environments |
+| **OAuth2/OIDC in app** | High | Login flow | User-specific features |
+| **mTLS (client certs)** | Medium | Cert management | Service-to-service |
+| **API keys** | Medium | Key management | Programmatic access |
+
+### Recommended: Zero Trust Proxy
+
+For an internal service like this, **don't add auth to the application**. Put a Zero Trust proxy in front.
+
+#### Option A: Cloudflare Access (Recommended)
+
+```
+User → Cloudflare Access → (authenticated) → Our Service
+           │
+           └─ Checks: corporate email, device posture, location
+```
+
+```yaml
+# Cloudflare Access policy (conceptual)
+application:
+  name: tfl-status
+  domain: tfl-status.ig.com
+
+policies:
+  - name: IG Employees Only
+    decision: allow
+    include:
+      - email_domain: ig.com
+    require:
+      - device_posture: corporateDevice
+```
+
+**Benefits:**
+- No code changes to service
+- SSO with corporate IdP (Okta, Azure AD, Google)
+- Device posture checks
+- Audit logs
+- Works for browser and API (via service tokens)
+
+#### Option B: Tailscale
+
+```
+User (on Tailnet) → Tailscale → Our Service (private IP)
+                         │
+                         └─ Service not exposed to internet at all
+```
+
+```yaml
+# Tailscale ACL
+{
+  "acls": [
+    {
+      "action": "accept",
+      "src": ["group:traders"],
+      "dst": ["tag:tfl-status:443"]
+    }
+  ],
+  "groups": {
+    "group:traders": ["user1@ig.com", "user2@ig.com"]
+  }
+}
+```
+
+**Benefits:**
+- Service has no public IP at all
+- Simple client (Tailscale app)
+- No changes to service
+- Built-in NAT traversal
+
+#### Option C: VPN + Internal DNS (Traditional)
+
+```
+User → Corporate VPN → Internal Network → Service
+                            │
+                            └─ tfl-status.internal (not resolvable externally)
+```
+
+```yaml
+# Ingress with internal-only class
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: tfl-status
+  annotations:
+    kubernetes.io/ingress.class: "internal-nginx"  # Internal LB only
+spec:
+  rules:
+    - host: tfl-status.internal  # Not in public DNS
+```
+
+**Benefits:**
+- No changes to service
+- Uses existing VPN infrastructure
+- Simple and proven
+
+### Service-to-Service Auth (If Needed)
+
+If other internal services call tfl-status (not just browsers):
+
+#### mTLS (Mutual TLS)
+
+```yaml
+# Istio/Linkerd service mesh
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: tfl-status
+  namespace: tfl-status
+spec:
+  mtls:
+    mode: STRICT  # Require client cert
+```
+
+#### Service Tokens (Cloudflare Access)
+
+```bash
+# Service gets a token from Cloudflare
+curl -H "CF-Access-Client-Id: $CLIENT_ID" \
+     -H "CF-Access-Client-Secret: $CLIENT_SECRET" \
+     https://tfl-status.ig.com/api/v1/tube/status
+```
+
+### What We're NOT Doing
+
+| Approach | Why Not |
+|----------|---------|
+| OAuth2 in application | Over-engineering for internal service |
+| API keys per user | Management overhead, we don't need user identity |
+| IP allowlisting | Fragile, doesn't work for remote workers |
+| Basic auth | Credentials in every request, no SSO |
+
+### Recommendation for IG
+
+Given IG is on-prem with some cloud migration:
+
+1. **Short term:** Internal network only (VPN required)
+   - Service on internal LB
+   - No public DNS entry
+   - Zero code changes
+
+2. **Medium term:** Cloudflare Access or Tailscale
+   - Enables secure remote access
+   - Zero Trust model
+   - Still zero code changes
+
+3. **If user identity needed later:** Add OAuth2 with corporate IdP
+   - But probably never needed for tube status
+
+### Implementation: Internal-Only Ingress
+
+```yaml
+# AWS: Internal ALB
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: tfl-status
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internal  # Not internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+spec:
+  ingressClassName: alb
+  rules:
+    - host: tfl-status.internal.ig.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: tfl-status
+                port:
+                  number: 8080
+```
+
+```yaml
+# On-prem: No external LoadBalancer, ClusterIP only
+apiVersion: v1
+kind: Service
+metadata:
+  name: tfl-status
+spec:
+  type: ClusterIP  # Only accessible within cluster or via VPN
+  ports:
+    - port: 8080
+```
+
+---
+
+## 11. Compliance Notes
 
 ### Data Classification
 
