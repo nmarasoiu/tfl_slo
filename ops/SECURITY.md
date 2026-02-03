@@ -4,6 +4,29 @@ TLS, network policies, WAF, and secrets management.
 
 ---
 
+## 0. Secrets Inventory (What We Actually Have)
+
+**Honest assessment:** This service has almost nothing to protect.
+
+| Secret | Exists? | Notes |
+|--------|---------|-------|
+| TfL API key | **No** | TfL API is public, no auth needed |
+| Database credentials | **No** | No database (stateless cache) |
+| User data | **No** | No user accounts, no PII |
+| Inter-node TLS certs | Optional | Only if enabling Pekko TLS |
+| Ingress TLS certs | Yes | Managed by cert-manager (auto-rotated) |
+
+**Total secrets to manage: ~0-2** (just TLS certs if we enable inter-node encryption)
+
+### Why Document Security Anyway?
+
+1. **Demonstrate SRE maturity** - Know the patterns even when not strictly needed
+2. **Future-proofing** - If we add authenticated endpoints or DB later
+3. **Defense in depth** - Protect infrastructure even if app has nothing sensitive
+4. **Compliance** - Some environments require security controls regardless
+
+---
+
 ## 1. TLS Configuration
 
 ### Traffic Encryption Matrix
@@ -14,6 +37,64 @@ TLS, network policies, WAF, and secrets management.
 | Ingress → Service | HTTP | HTTP (internal) | K8s network policy |
 | Service → TfL API | HTTPS | HTTPS | Already implemented |
 | Node ↔ Node (Pekko) | Unencrypted | TLS | Pekko Artery SSL |
+
+### TLS Version and Cipher Configuration
+
+**Minimum:** TLS 1.2 (required)
+**Preferred:** TLS 1.3 (when available)
+
+#### NGINX Ingress TLS Config
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-ingress-controller
+  namespace: ingress-nginx
+data:
+  # TLS versions
+  ssl-protocols: "TLSv1.2 TLSv1.3"
+
+  # TLS 1.3 ciphers (preferred)
+  ssl-ciphers: "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256"
+
+  # Prefer server ciphers
+  ssl-prefer-server-ciphers: "true"
+
+  # HSTS (1 year, include subdomains)
+  hsts: "true"
+  hsts-max-age: "31536000"
+  hsts-include-subdomains: "true"
+```
+
+#### Pekko Cluster TLS Config
+
+```hocon
+pekko.remote.artery.ssl.config-ssl-engine {
+  # Minimum TLS 1.2, prefer 1.3
+  protocol = "TLSv1.3"
+
+  # Strong ciphers only
+  enabled-algorithms = [
+    "TLS_AES_256_GCM_SHA384",
+    "TLS_AES_128_GCM_SHA256"
+  ]
+
+  # Require client auth (mutual TLS)
+  require-mutual-authentication = on
+}
+```
+
+#### Java HttpClient (to TfL API)
+
+```java
+// TfL API uses TLS 1.2/1.3 - Java 21 handles this automatically
+// No configuration needed, but can enforce:
+SSLContext sslContext = SSLContext.getInstance("TLSv1.3");
+HttpClient client = HttpClient.newBuilder()
+    .sslContext(sslContext)
+    .build();
+```
 
 ### Ingress TLS (cert-manager)
 
@@ -39,6 +120,10 @@ metadata:
   name: tfl-status
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt-prod
+    # Force HTTPS redirect
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # TLS version enforcement at ingress level
+    nginx.ingress.kubernetes.io/ssl-protocols: "TLSv1.2 TLSv1.3"
 spec:
   tls:
     - hosts:
@@ -331,6 +416,83 @@ spec:
           {{- end }}
 ```
 
+### External Secrets Operator vs CSI Driver
+
+Two approaches for pulling secrets from external stores into Kubernetes:
+
+| Aspect | External Secrets Operator | Secrets Store CSI Driver |
+|--------|---------------------------|--------------------------|
+| **How it works** | Controller syncs external secrets → K8s Secrets | Mounts secrets as files via CSI volume |
+| **K8s Secret created?** | Yes (synced copy) | No (direct mount) |
+| **Rotation** | Controller polls and updates | Rotation requires pod restart |
+| **GitOps friendly** | Yes (ExternalSecret is declarative) | Yes (SecretProviderClass is declarative) |
+| **Secret in etcd?** | Yes (as K8s Secret) | No (memory only) |
+| **Supports** | Vault, AWS SM, GCP SM, Azure KV | Vault, AWS SM, GCP SM, Azure KV |
+
+#### External Secrets Operator (Recommended for most cases)
+
+```yaml
+# ExternalSecret syncs from AWS Secrets Manager
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: tfl-status-certs
+  namespace: tfl-status
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: aws-secrets-manager
+    kind: ClusterSecretStore
+  target:
+    name: tfl-status-certs  # K8s Secret created
+  data:
+    - secretKey: keystore.p12
+      remoteRef:
+        key: tfl-status/certs
+        property: keystore
+```
+
+#### Secrets Store CSI Driver (For high-security, no etcd storage)
+
+```yaml
+# SecretProviderClass for AWS Secrets Manager
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: tfl-status-certs
+spec:
+  provider: aws
+  parameters:
+    objects: |
+      - objectName: "tfl-status/certs"
+        objectType: "secretsmanager"
+
+# Pod mounts secrets as volume (never in etcd)
+spec:
+  volumes:
+    - name: secrets
+      csi:
+        driver: secrets-store.csi.k8s.io
+        readOnly: true
+        volumeAttributes:
+          secretProviderClass: tfl-status-certs
+  containers:
+    - volumeMounts:
+        - name: secrets
+          mountPath: /mnt/secrets
+          readOnly: true
+```
+
+#### Recommendation for This Service
+
+**Use:** Sealed Secrets or External Secrets Operator
+
+**Why:**
+- We have minimal secrets (just optional TLS certs)
+- CSI driver complexity not justified
+- External Secrets Operator is simpler and GitOps-friendly
+- If truly zero secrets needed, just use cert-manager for TLS (no manual secrets)
+
 ### Environment Variables (12-factor)
 
 ```yaml
@@ -450,7 +612,229 @@ ENTRYPOINT ["java", "-jar", "app.jar"]
 
 ---
 
-## 7. Audit Logging
+## 7. Pull-Based GitOps (Security Model)
+
+### Push vs Pull Deployment
+
+| Model | How It Works | Security Implications |
+|-------|--------------|----------------------|
+| **Push** | CI/CD pushes to cluster | Cluster credentials in CI, network path from CI to cluster |
+| **Pull** | ArgoCD inside cluster pulls from Git | No inbound access needed, cluster pulls only |
+
+### Pull-Based Benefits
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        CLUSTER                                   │
+│                   (Firewall: ingress HTTPS only)                │
+│                                                                  │
+│   ┌──────────────┐         ┌──────────────┐                     │
+│   │   ArgoCD     │◄────────│  Git Repo    │ (outbound HTTPS)    │
+│   │  (pulls)     │         │              │                     │
+│   └──────┬───────┘         └──────────────┘                     │
+│          │                                                       │
+│          │ deploys                                               │
+│          ▼                                                       │
+│   ┌──────────────┐                                              │
+│   │  tfl-status  │                                              │
+│   │    pods      │                                              │
+│   └──────────────┘                                              │
+│                                                                  │
+│   NO INBOUND PORTS for deployment                               │
+│   CI never touches cluster directly                             │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### ArgoCD Configuration (Pull-Based)
+
+```yaml
+# ArgoCD pulls manifests from Git - no push access needed
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: tfl-status
+  namespace: argocd
+spec:
+  source:
+    repoURL: https://github.com/ig/tfl-status  # ArgoCD pulls from here
+    targetRevision: main
+    path: helm/tfl-status
+  destination:
+    server: https://kubernetes.default.svc  # Local cluster
+    namespace: tfl-status
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true  # Reverts manual changes
+```
+
+### CI Pipeline (No Cluster Access)
+
+```yaml
+# CI only pushes to Git, never to cluster
+jobs:
+  build:
+    steps:
+      - name: Build and push image
+        run: docker push ghcr.io/ig/tfl-status:${{ github.sha }}
+
+      - name: Update Git manifest
+        run: |
+          # CI updates Git, ArgoCD pulls the change
+          git clone https://github.com/ig/gitops-repo
+          yq -i '.image.tag = "${{ github.sha }}"' values.yaml
+          git commit -am "Update image to ${{ github.sha }}"
+          git push
+          # CI NEVER runs kubectl, helm install, etc.
+```
+
+---
+
+## 8. Network Hardening (Zero Trust)
+
+### Cluster Firewall Rules
+
+**Principle:** Cluster accepts nothing except HTTPS on ingress. All deployment is pull-based.
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                     FIREWALL RULES                            │
+├──────────────────────────────────────────────────────────────┤
+│ INBOUND (Internet → Cluster)                                 │
+│   ✓ TCP 443 (HTTPS) → Ingress Controller                    │
+│   ✗ All other ports BLOCKED                                  │
+│   ✗ TCP 22 (SSH) - use kubectl exec or bastion               │
+│   ✗ TCP 6443 (K8s API) - internal only or VPN               │
+├──────────────────────────────────────────────────────────────┤
+│ OUTBOUND (Cluster → Internet)                                │
+│   ✓ TCP 443 → api.tfl.gov.uk (TfL API)                      │
+│   ✓ TCP 443 → ghcr.io (container registry)                  │
+│   ✓ TCP 443 → github.com (ArgoCD pulls)                     │
+│   ✓ TCP 443 → acme-v02.api.letsencrypt.org (cert-manager)   │
+│   ✗ All other destinations BLOCKED                           │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### AWS Security Groups (Example)
+
+```hcl
+# Cluster nodes - no direct inbound
+resource "aws_security_group" "cluster_nodes" {
+  name = "tfl-status-nodes"
+
+  # No inbound from internet
+  # Only from load balancer
+  ingress {
+    from_port       = 0
+    to_port         = 0
+    protocol        = "-1"
+    security_groups = [aws_security_group.alb.id]
+  }
+
+  # Outbound restricted
+  egress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]  # Or specific IPs for TfL, registry
+  }
+}
+
+# ALB - HTTPS only
+resource "aws_security_group" "alb" {
+  name = "tfl-status-alb"
+
+  ingress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # No port 80 - redirect handled at ALB level
+}
+```
+
+### Kubernetes Network Policies (Defense in Depth)
+
+Even with cloud firewall, apply K8s network policies for namespace isolation:
+
+```yaml
+# Default deny all
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: tfl-status
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+---
+# Allow only what's needed
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tfl-status-policy
+  namespace: tfl-status
+spec:
+  podSelector:
+    matchLabels:
+      app: tfl-status
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Only from ingress controller
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: ingress-nginx
+      ports:
+        - port: 8080
+  egress:
+    # To TfL API only (by DNS, or IP if known)
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0  # TfL IPs not static
+      ports:
+        - port: 443
+    # DNS resolution
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+```
+
+### K8s API Access
+
+```yaml
+# K8s API should not be exposed to internet
+# Access via:
+# 1. VPN + kubectl
+# 2. Bastion host
+# 3. Cloud console (AWS/GCP)
+
+# If must expose, use authorized networks:
+# AWS EKS:
+resource "aws_eks_cluster" "main" {
+  vpc_config {
+    endpoint_public_access  = true
+    public_access_cidrs     = ["10.0.0.0/8"]  # Office IPs only
+    endpoint_private_access = true
+  }
+}
+```
+
+---
+
+## 9. Audit Logging
 
 ### Kubernetes Audit Policy
 
@@ -483,7 +867,7 @@ log.info("Auth: {} from {} - {}",
 
 ---
 
-## 8. Compliance Notes
+## 10. Compliance Notes
 
 ### Data Classification
 
