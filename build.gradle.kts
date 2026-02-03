@@ -211,6 +211,17 @@ dependencyCheck {
     failBuildOnCVSS = 7.0f  // Fail on HIGH or CRITICAL vulnerabilities
     formats = listOf("HTML", "JSON")
     suppressionFile = "config/owasp/suppressions.xml"
+
+    // NVD API Key - get free key at https://nvd.nist.gov/developers/request-an-api-key
+    // Set via: export NVD_API_KEY=your-key-here
+    val apiKey = System.getenv("NVD_API_KEY")
+    if (!apiKey.isNullOrBlank()) {
+        nvd.apiKey = apiKey
+    } else {
+        // No API key - skip NVD updates to avoid rate limiting failures
+        nvd.validForHours = 24 * 30  // Use cached data for 30 days
+    }
+
     analyzers.apply {
         assemblyEnabled = false  // Disable .NET analyzer
         nodeEnabled = false      // Disable Node.js analyzer
@@ -234,11 +245,21 @@ tasks.register("qualityCheck") {
     )
 }
 
-// Full verification including security scan (slower)
+// Full verification including security scan (requires NVD_API_KEY)
 tasks.register("fullCheck") {
-    description = "Runs all checks including OWASP dependency scan"
+    description = "Runs all checks including OWASP dependency scan (set NVD_API_KEY first)"
     group = "verification"
-    dependsOn("qualityCheck", "dependencyCheckAnalyze")
+    dependsOn("qualityCheck")
+
+    // Only run dependency check if API key is available
+    if (!System.getenv("NVD_API_KEY").isNullOrBlank()) {
+        dependsOn("dependencyCheckAnalyze")
+    } else {
+        doLast {
+            logger.warn("Skipping OWASP dependency check - set NVD_API_KEY env var")
+            logger.warn("Get free key: https://nvd.nist.gov/developers/request-an-api-key")
+        }
+    }
 }
 
 // Make 'check' task run quality checks
