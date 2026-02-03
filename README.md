@@ -68,9 +68,34 @@ curl http://localhost:8080/api/health/ready
 
 | Request | Behavior |
 |---------|----------|
-| `/status` | Return cached data (any age) |
+| `/status` | Return cached data (default 60s freshness) |
 | `/status?maxAgeMs=60000` | Return if ≤60s old, else try TfL, else return stale with `X-Data-Stale: true` |
-| `/status?maxAgeMs=0` | Always attempt TfL fetch (still returns stale on failure) |
+| `/status?maxAgeMs=1000` | Floor enforced at 5s (headers indicate: `X-Freshness-Floor-Applied: true`) |
+
+**Note:** A 5-second freshness floor protects against unreasonable demands that could exhaust TfL API quota.
+
+---
+
+## Cache-First Architecture
+
+**Key property:** Users almost never wait for TfL API responses.
+
+The only time a user request blocks on TfL is during **first cold start of the entire cluster** (no cached data exists anywhere). After that:
+
+| Scenario | User Experience |
+|----------|----------------|
+| Normal operation | Served from cache instantly |
+| Node restart | New node reads from CRDT peers, serves immediately |
+| Rolling upgrade | Nodes join cluster, get data from peers via gossip |
+| Network partition | Each partition serves from local cache (AP model) |
+| TfL API down | Stale data served with `X-Data-Stale: true` header |
+
+**How it works:**
+1. **Background poller** refreshes cache every 30s regardless of user traffic
+2. **CRDT replication** (Pekko Distributed Data) keeps data synchronized across nodes
+3. On startup, nodes check peers before calling TfL - if peer data is fresh enough, no TfL call needed
+
+**Result:** ~99% of requests are served from cache. TfL API quota is consumed only by the background poller (~2 calls/min per node), not by user traffic spikes.
 
 ---
 
@@ -88,12 +113,13 @@ curl http://localhost:8080/api/health/ready
     }
   ],
   "meta": {
-    "queriedAt": "2026-02-02T14:30:00Z",
-    "queriedBy": "node-1",
-    "ageMs": 5000
+    "dataAsOfUtc": "2026-02-02T14:30:00.123Z",
+    "respondedAtUtc": "2026-02-02T14:30:05.456Z"
   }
 }
 ```
+
+All timestamps are ISO-8601 UTC. Compute freshness as `respondedAtUtc - dataAsOfUtc`.
 
 ---
 
