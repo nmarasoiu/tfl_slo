@@ -95,7 +95,7 @@ The only time a user request blocks on TfL is during **first cold start of the e
 2. **CRDT replication** (Pekko Distributed Data) keeps data synchronized across nodes
 3. On startup, nodes check peers before calling TfL - if peer data is fresh enough, no TfL call needed
 
-**Result:** ~99% of requests are served from cache. TfL API quota is consumed only by the background poller (~2 calls/min per node), not by user traffic spikes.
+**Result:** ~99% of requests are served from cache. TfL API quota is consumed only by the background poller (~2 calls/min for the entire cluster in P99), not by user traffic spikes. When one node fetches from TfL, CRDT gossip propagates the data to other nodes within 200ms - before their pollers fire - so they skip their TfL calls.
 
 ---
 
