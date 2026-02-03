@@ -215,18 +215,3 @@ We use manual instrumentation instead - simpler, sufficient for our needs.
 | Resilience | Pekko built-ins | Yes | CircuitBreaker, RetrySupport |
 | Observability | Micrometer/OTel | Yes | Standard tools |
 
----
-
-## Interview Questions This Answers
-
-1. **"Why Pekko HTTP over Spring WebFlux?"**
-   - Already using Pekko actors; native integration; one async model.
-
-2. **"Why typed actors over classic?"**
-   - Compile-time safety; clearer behavior modeling; future direction of Pekko.
-
-3. **"Why not Kubernetes for service discovery?"**
-   - Kubernetes handles infrastructure; Pekko Cluster handles application-level coordination and CRDT replication.
-
-4. **"Why use Pekko's built-in CircuitBreaker?"**
-   - Scheduler-integrated, telemetry hooks, well-tested. Manual rate limiter remains for per-client limiting (no Pekko equivalent).
