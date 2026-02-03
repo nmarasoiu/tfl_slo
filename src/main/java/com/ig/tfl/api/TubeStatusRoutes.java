@@ -46,16 +46,28 @@ public class TubeStatusRoutes extends AllDirectives {
     private final ActorRef<TflGateway.Command> tflGateway;
     private final RateLimiter rateLimiter;
     private final ObjectMapper objectMapper;
-    private final Duration askTimeout = Duration.ofSeconds(5);
+    private final Duration askTimeout;
 
     public TubeStatusRoutes(
             ActorSystem<?> system,
             ActorRef<TubeStatusReplicator.Command> replicator,
             ActorRef<TflGateway.Command> tflGateway) {
+        this(system, replicator, tflGateway,
+                system.settings().config().getInt("tfl.rate-limit.requests-per-minute"),
+                system.settings().config().getDuration("tfl.http.ask-timeout"));
+    }
+
+    public TubeStatusRoutes(
+            ActorSystem<?> system,
+            ActorRef<TubeStatusReplicator.Command> replicator,
+            ActorRef<TflGateway.Command> tflGateway,
+            int requestsPerMinute,
+            Duration askTimeout) {
         this.system = system;
         this.replicator = replicator;
         this.tflGateway = tflGateway;
-        this.rateLimiter = RateLimiter.perMinute(100);
+        this.rateLimiter = RateLimiter.perMinute(requestsPerMinute);
+        this.askTimeout = askTimeout;
         this.objectMapper = new ObjectMapper()
                 .registerModule(new JavaTimeModule());
     }

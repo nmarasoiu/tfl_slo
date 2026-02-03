@@ -32,12 +32,10 @@ public class TubeStatusReplicator extends AbstractBehavior<TubeStatusReplicator.
     private static final Key<LWWRegister<TubeStatus>> STATUS_KEY =
             LWWRegisterKey.create("tube-status");
 
-    // Soft threshold: trigger background refresh if data older than this
-    private static final long BACKGROUND_REFRESH_THRESHOLD_MS = 5_000;
-
     // Configuration
     private final Duration refreshInterval;
     private final Duration recentEnoughThreshold;
+    private final Duration backgroundRefreshThreshold;
     private final String nodeId;
 
     // Dependencies
@@ -106,10 +104,20 @@ public class TubeStatusReplicator extends AbstractBehavior<TubeStatusReplicator.
             String nodeId,
             Duration refreshInterval,
             Duration recentEnoughThreshold) {
+        return create(tflGateway, nodeId, refreshInterval, recentEnoughThreshold,
+                Duration.ofSeconds(5)); // Default background refresh threshold
+    }
+
+    public static Behavior<Command> create(
+            ActorRef<TflGateway.Command> tflGateway,
+            String nodeId,
+            Duration refreshInterval,
+            Duration recentEnoughThreshold,
+            Duration backgroundRefreshThreshold) {
         return Behaviors.setup(context ->
                 Behaviors.withTimers(timers ->
                         new TubeStatusReplicator(context, timers, tflGateway, nodeId,
-                                refreshInterval, recentEnoughThreshold)));
+                                refreshInterval, recentEnoughThreshold, backgroundRefreshThreshold)));
     }
 
     private TubeStatusReplicator(
@@ -118,13 +126,15 @@ public class TubeStatusReplicator extends AbstractBehavior<TubeStatusReplicator.
             ActorRef<TflGateway.Command> tflGateway,
             String nodeId,
             Duration refreshInterval,
-            Duration recentEnoughThreshold) {
+            Duration recentEnoughThreshold,
+            Duration backgroundRefreshThreshold) {
         super(context);
 
         this.tflGateway = tflGateway;
         this.nodeId = nodeId;
         this.refreshInterval = refreshInterval;
         this.recentEnoughThreshold = recentEnoughThreshold;
+        this.backgroundRefreshThreshold = backgroundRefreshThreshold;
         this.selfCluster = SelfCluster.get(context.getSystem());
 
         // Set up replicator adapter for distributed data
@@ -179,9 +189,9 @@ public class TubeStatusReplicator extends AbstractBehavior<TubeStatusReplicator.
         // Cache is fresh enough
         if (currentStatus.ageMs() <= msg.maxAgeMs()) {
             // Check soft threshold for proactive refresh
-            if (currentStatus.ageMs() > BACKGROUND_REFRESH_THRESHOLD_MS) {
+            if (currentStatus.ageMs() > backgroundRefreshThreshold.toMillis()) {
                 log.debug("Data is {}ms old (> {}ms soft threshold) - triggering background refresh",
-                        currentStatus.ageMs(), BACKGROUND_REFRESH_THRESHOLD_MS);
+                        currentStatus.ageMs(), backgroundRefreshThreshold.toMillis());
                 fetchFromTfl();
             }
             msg.replyTo().tell(new StatusResponse(currentStatus, false, msg.maxAgeMs()));

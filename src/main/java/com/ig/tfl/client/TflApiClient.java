@@ -3,9 +3,9 @@ package com.ig.tfl.client;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import com.ig.tfl.model.TflApiResponse;
 import com.ig.tfl.model.TubeStatus;
 import com.ig.tfl.model.TubeStatus.LineStatus;
-import com.ig.tfl.model.TubeStatus.TflLineResponse;
 import com.ig.tfl.resilience.CircuitBreaker;
 import com.ig.tfl.resilience.RetryPolicy;
 import org.apache.pekko.actor.typed.ActorSystem;
@@ -34,7 +34,7 @@ public class TflApiClient implements TflClient {
     private static final Logger log = LoggerFactory.getLogger(TflApiClient.class);
 
     private static final String DEFAULT_TFL_BASE_URL = "https://api.tfl.gov.uk";
-    private static final long RESPONSE_TIMEOUT_MS = 10_000;
+    private static final Duration DEFAULT_RESPONSE_TIMEOUT = Duration.ofSeconds(10);
 
     private final ActorSystem<?> system;
     private final Http http;
@@ -44,12 +44,30 @@ public class TflApiClient implements TflClient {
     private final RetryPolicy retryPolicy;
     private final String nodeId;
     private final String baseUrl;
+    private final Duration responseTimeout;
 
     public TflApiClient(ActorSystem<?> system, String nodeId) {
-        this(system, nodeId, DEFAULT_TFL_BASE_URL);
+        this(system, nodeId, DEFAULT_TFL_BASE_URL,
+                CircuitBreaker.withDefaults("tfl-api"),
+                RetryPolicy.defaults(),
+                DEFAULT_RESPONSE_TIMEOUT);
     }
 
     public TflApiClient(ActorSystem<?> system, String nodeId, String baseUrl) {
+        this(system, nodeId, baseUrl,
+                CircuitBreaker.withDefaults("tfl-api"),
+                RetryPolicy.defaults(),
+                DEFAULT_RESPONSE_TIMEOUT);
+    }
+
+    public TflApiClient(ActorSystem<?> system, String nodeId, String baseUrl,
+                        CircuitBreaker circuitBreaker, RetryPolicy retryPolicy) {
+        this(system, nodeId, baseUrl, circuitBreaker, retryPolicy, DEFAULT_RESPONSE_TIMEOUT);
+    }
+
+    public TflApiClient(ActorSystem<?> system, String nodeId, String baseUrl,
+                        CircuitBreaker circuitBreaker, RetryPolicy retryPolicy,
+                        Duration responseTimeout) {
         this.system = system;
         this.nodeId = nodeId;
         this.baseUrl = baseUrl;
@@ -57,8 +75,9 @@ public class TflApiClient implements TflClient {
         this.materializer = Materializer.createMaterializer(system);
         this.objectMapper = new ObjectMapper()
                 .registerModule(new JavaTimeModule());
-        this.circuitBreaker = CircuitBreaker.withDefaults("tfl-api");
-        this.retryPolicy = RetryPolicy.defaults();
+        this.circuitBreaker = circuitBreaker;
+        this.retryPolicy = retryPolicy;
+        this.responseTimeout = responseTimeout;
     }
 
     /**
@@ -104,7 +123,7 @@ public class TflApiClient implements TflClient {
 
     private CompletionStage<TubeStatus> doFetchAllLines() {
         String url = baseUrl + "/Line/Mode/tube/Status";
-        return fetchAndParse(url, new TypeReference<List<TflLineResponse>>() {})
+        return fetchAndParse(url, new TypeReference<List<TflApiResponse.LineResponse>>() {})
                 .thenApply(this::toTubeStatus);
     }
 
@@ -113,7 +132,7 @@ public class TflApiClient implements TflClient {
                 baseUrl, lineId,
                 from.format(DateTimeFormatter.ISO_LOCAL_DATE),
                 to.format(DateTimeFormatter.ISO_LOCAL_DATE));
-        return fetchAndParse(url, new TypeReference<List<TflLineResponse>>() {})
+        return fetchAndParse(url, new TypeReference<List<TflApiResponse.LineResponse>>() {})
                 .thenApply(this::toTubeStatus);
     }
 
@@ -147,7 +166,7 @@ public class TflApiClient implements TflClient {
 
         // Collect response body
         return response.entity()
-                .toStrict(RESPONSE_TIMEOUT_MS, materializer)
+                .toStrict(responseTimeout.toMillis(), materializer)
                 .thenApply(entity -> {
                     try {
                         String body = entity.getData().utf8String();
@@ -159,7 +178,7 @@ public class TflApiClient implements TflClient {
                 .toCompletableFuture();
     }
 
-    private TubeStatus toTubeStatus(List<TflLineResponse> responses) {
+    private TubeStatus toTubeStatus(List<TflApiResponse.LineResponse> responses) {
         List<LineStatus> lines = responses.stream()
                 .map(LineStatus::fromTflResponse)
                 .toList();

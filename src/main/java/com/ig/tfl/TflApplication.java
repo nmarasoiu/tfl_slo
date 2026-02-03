@@ -4,6 +4,8 @@ import com.ig.tfl.api.TubeStatusRoutes;
 import com.ig.tfl.client.TflApiClient;
 import com.ig.tfl.client.TflGateway;
 import com.ig.tfl.crdt.TubeStatusReplicator;
+import com.ig.tfl.resilience.CircuitBreaker;
+import com.ig.tfl.resilience.RetryPolicy;
 import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
 import org.apache.pekko.actor.typed.ActorRef;
@@ -70,8 +72,29 @@ public class TflApplication {
             this.nodeId = nodeId;
             this.httpPort = httpPort;
 
-            // Create TfL API client (non-actor, used by TflGateway)
-            TflApiClient tflApiClient = new TflApiClient(context.getSystem(), nodeId);
+            Config config = context.getSystem().settings().config();
+
+            // Create resilience components from config
+            int cbFailureThreshold = config.getInt("tfl.circuit-breaker.failure-threshold");
+            Duration cbOpenDuration = config.getDuration("tfl.circuit-breaker.open-duration");
+            CircuitBreaker circuitBreaker = new CircuitBreaker("tfl-api", cbFailureThreshold, cbOpenDuration);
+
+            int retryMaxRetries = config.getInt("tfl.retry.max-retries");
+            Duration retryBaseDelay = config.getDuration("tfl.retry.base-delay");
+            Duration retryMaxDelay = config.getDuration("tfl.retry.max-delay");
+            double retryJitterFactor = config.getDouble("tfl.retry.jitter-factor");
+            RetryPolicy retryPolicy = RetryPolicy.builder()
+                    .maxRetries(retryMaxRetries)
+                    .baseDelay(retryBaseDelay)
+                    .maxDelay(retryMaxDelay)
+                    .jitterFactor(retryJitterFactor)
+                    .build();
+
+            // Create TfL API client with injected resilience dependencies
+            Duration responseTimeout = config.getDuration("tfl.http.response-timeout");
+            TflApiClient tflApiClient = new TflApiClient(
+                    context.getSystem(), nodeId, "https://api.tfl.gov.uk",
+                    circuitBreaker, retryPolicy, responseTimeout);
 
             // Create TflGateway actor - single point of contact for TfL API
             this.tflGateway = context.spawn(
@@ -79,12 +102,16 @@ public class TflApplication {
                     "tfl-gateway");
 
             // Create CRDT replicator actor - uses TflGateway for fetches
+            Duration refreshInterval = config.getDuration("tfl.refresh.interval");
+            Duration recentEnoughThreshold = config.getDuration("tfl.refresh.recent-enough-threshold");
+            Duration backgroundRefreshThreshold = config.getDuration("tfl.refresh.background-refresh-threshold");
             this.replicator = context.spawn(
                     TubeStatusReplicator.create(
                             tflGateway,
                             nodeId,
-                            Duration.ofSeconds(30),  // refresh interval
-                            Duration.ofSeconds(5)    // recent enough threshold
+                            refreshInterval,
+                            recentEnoughThreshold,
+                            backgroundRefreshThreshold
                     ),
                     "tube-status-replicator");
 

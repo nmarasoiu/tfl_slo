@@ -50,7 +50,7 @@ public record TubeStatus(
         /**
          * Parse from TfL API response format.
          */
-        public static LineStatus fromTflResponse(TflLineResponse response) {
+        public static LineStatus fromTflResponse(TflApiResponse.LineResponse response) {
             String status = "Unknown";
             String statusDesc = "";
             List<Disruption> disruptions = List.of();
@@ -83,25 +83,4 @@ public record TubeStatus(
             String description,
             boolean isPlanned
     ) implements Serializable {}
-
-    // TfL API response format
-    @JsonIgnoreProperties(ignoreUnknown = true)
-    public record TflLineResponse(
-            String id,
-            String name,
-            @JsonProperty("lineStatuses") List<TflLineStatus> lineStatuses
-    ) {}
-
-    @JsonIgnoreProperties(ignoreUnknown = true)
-    public record TflLineStatus(
-            String statusSeverityDescription,
-            TflDisruption disruption
-    ) {}
-
-    @JsonIgnoreProperties(ignoreUnknown = true)
-    public record TflDisruption(
-            String categoryDescription,
-            String description,
-            @JsonProperty("isPlanned") boolean isPlanned
-    ) {}
 }

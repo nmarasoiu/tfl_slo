@@ -116,7 +116,9 @@ class ServiceSmokeTest {
         TubeStatusRoutes routes = new TubeStatusRoutes(
                 testKit.system(),
                 replicator,
-                tflGateway);
+                tflGateway,
+                100,  // requests per minute
+                Duration.ofSeconds(5));  // ask timeout
 
         http = Http.get(testKit.system());
         materializer = Materializer.createMaterializer(testKit.system());
