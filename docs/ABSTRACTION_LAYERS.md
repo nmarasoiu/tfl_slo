@@ -179,7 +179,7 @@ pekko.cluster {
 | Timeout | Ask timeout | Native |
 | Bulkhead | Actor isolation | Natural in actor model |
 
-See [ADR-003](adr/ADR-003-manual-resilience-patterns.md) for decision history.
+Rate limiter remains manual as Pekko has no per-client equivalent.
 
 ---
 
