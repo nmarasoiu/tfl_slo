@@ -1,6 +1,6 @@
-# Production Readiness Checklist
+# Production Readiness
 
-This document outlines what's needed to take this service from exercise to production.
+This document covers testing strategy and what's needed to take this service to production.
 
 ---
 
@@ -9,118 +9,104 @@ This document outlines what's needed to take this service from exercise to produ
 ### Philosophy: Detroit Style (Classical TDD)
 
 - **Real collaborators** over mocks where possible
-- **Mock at system boundaries** only (TfL API, clock, network)
-- **Integration tests are first-class** - they catch what unit tests miss during refactors
-- **High ROI focus** - test behavior, not implementation details
+- **Mock at system boundaries** only (TfL API, network)
+- **Test behavior**, not implementation details
+- **High ROI** - focus on tests that catch real bugs
+
+**What we DON'T do:** Mock internal classes, verify method call counts, test private methods.
 
 ### Test Pyramid
 
 ```
-                    ┌─────────────┐
-                    │   E2E/Chaos │  Few, expensive, high confidence
-                    ├─────────────┤
-                    │ Integration │  Real components, mocked boundaries
-                    ├─────────────┤
-                    │    Unit     │  Pure functions, state machines
-                    └─────────────┘
+                    ┌─────────────────┐
+                    │  Multi-Node /   │  Few, expensive
+                    │  Chaos Tests    │  High confidence
+                    ├─────────────────┤
+                    │  Integration    │  Real HTTP, WireMock
+                    │  Tests          │  Real actors
+                    ├─────────────────┤
+                    │  Unit Tests     │  Pure functions
+                    │                 │  State machines
+                    └─────────────────┘
+                         Many, fast
 ```
 
-#### Unit Tests (Fast, Focused)
+### What to Test at Each Layer
 
-| Component | What to Test | Approach |
-|-----------|--------------|----------|
-| CircuitBreaker | State transitions (CLOSED→OPEN→HALF_OPEN) | Real clock or controllable clock |
-| RetryPolicy | Backoff calculation, jitter bounds | Pure function, no mocking |
-| RateLimiter | Token bucket refill, exhaustion | Controllable clock |
-| TubeStatus | Freshness calculation, confidence levels | Pure |
+| Layer | Component | Approach |
+|-------|-----------|----------|
+| Unit | CircuitBreaker | Real object, controllable clock |
+| Unit | RetryPolicy | Pure function |
+| Unit | RateLimiter | Real object, controllable clock |
+| Integration | TflApiClient | Real HTTP + WireMock |
+| Integration | HTTP routes | Full Pekko HTTP stack |
+| Multi-node | CRDT convergence | Pekko Multi-Node TestKit |
+| Chaos | Partition tolerance | Toxiproxy |
+
+### Example: Circuit Breaker Unit Test
 
 ```java
-// Example: Circuit breaker with real failures, not mocks
 @Test
 void opensAfterFiveConsecutiveFailures() {
     var cb = new CircuitBreaker("test", 5, Duration.ofSeconds(30));
 
     for (int i = 0; i < 5; i++) {
-        cb.onFailure(new RuntimeException("fail " + i));
+        cb.onFailure(new RuntimeException("fail"));
     }
 
     assertThat(cb.getState()).isEqualTo(State.OPEN);
 }
 ```
 
-#### Integration Tests (Real Collaborators, Mocked Boundaries)
-
-| Test | Components | Mocked |
-|------|------------|--------|
-| TflApiClient integration | HttpClient + CircuitBreaker + RetryPolicy | WireMock for TfL |
-| HTTP routes | Full Pekko HTTP stack | TfL API |
-| CRDT replication | Multi-node Pekko cluster | TfL API |
+### Example: WireMock Integration Test
 
 ```java
-// Example: Real HTTP client against WireMock
 @Test
 void retriesOn503ThenSucceeds() {
     wireMock.stubFor(get("/Line/Mode/tube/Status")
         .inScenario("retry")
         .whenScenarioStateIs(STARTED)
         .willReturn(serverError())
-        .willSetStateTo("second-attempt"));
+        .willSetStateTo("attempt-2"));
 
     wireMock.stubFor(get("/Line/Mode/tube/Status")
         .inScenario("retry")
-        .whenScenarioStateIs("second-attempt")
-        .willReturn(okJson(TUBE_STATUS_JSON)));
+        .whenScenarioStateIs("attempt-2")
+        .willReturn(okJson(SAMPLE_TFL_RESPONSE)));
 
-    var client = new TflApiClient("test-node");
-    var result = client.fetchAllLines();
+    TubeStatus status = client.fetchAllLinesAsync()
+        .toCompletableFuture().join();
 
-    assertThat(result.lines()).hasSize(11);
+    assertThat(status.lines()).isNotEmpty();
     wireMock.verify(2, getRequestedFor(urlPathEqualTo("/Line/Mode/tube/Status")));
 }
 ```
 
-#### Multi-Node / Chaos Tests
+### What We DON'T Test
 
-| Test | Setup | Tool |
-|------|-------|------|
-| CRDT convergence | 3-node cluster | Pekko Multi-Node TestKit |
-| Network partition | Split cluster | Toxiproxy |
-| Node failure | Kill random node | Chaos Monkey / custom |
-| TfL outage | Block TfL endpoint | Toxiproxy |
-| Slow TfL | Add latency | Toxiproxy |
+| Skip | Why |
+|------|-----|
+| Pekko internals | Trust the framework |
+| JSON parsing edge cases | Jackson is well-tested |
+| CRDT merge algorithm | Pekko Distributed Data is well-tested |
 
-```java
-// Example: Toxiproxy partition test
-@Test
-void continuesServingDuringPartition() {
-    // Setup: 3 nodes, all healthy
-    cluster.awaitAllNodesUp();
+**Test our code, not the framework.**
 
-    // Partition node-3 from others
-    toxiproxy.partition("node-3");
+### Coverage Goals
 
-    // Both partitions should still serve (AP)
-    assertThat(queryNode1("/api/v1/tube/status")).isSuccessful();
-    assertThat(queryNode3("/api/v1/tube/status")).isSuccessful();
-
-    // Heal partition
-    toxiproxy.heal("node-3");
-
-    // Data should converge
-    await().atMost(10, SECONDS).until(() ->
-        dataOnNode1().equals(dataOnNode3()));
-}
-```
+| Layer | Target | Rationale |
+|-------|--------|-----------|
+| Unit | 90%+ | Fast, cheap, catch logic bugs |
+| Integration | Key paths | Real HTTP, real actors |
+| Multi-node | Happy + partition | Validate distributed behavior |
 
 ---
 
 ## 2. Observability
 
-### Metrics (Prometheus)
+### Metrics (Prometheus) - TODO
 
 ```java
-// Add micrometer-registry-prometheus dependency
-
 // Request metrics
 Counter.builder("http_requests_total")
     .tag("method", method)
@@ -139,14 +125,9 @@ Gauge.builder("data_freshness_seconds", this::getCurrentFreshness)
 Gauge.builder("circuit_breaker_state", () -> circuitBreaker.getState().ordinal())
     .tag("name", "tfl-api")
     .register(registry);
-
-// CRDT metrics
-Counter.builder("crdt_updates_total")
-    .tag("source", source)  // TFL, PEER
-    .register(registry);
 ```
 
-### Logging (Structured JSON)
+### Logging (Structured JSON) - Partial
 
 ```xml
 <!-- logback.xml for production -->
@@ -156,30 +137,11 @@ Counter.builder("crdt_updates_total")
 </encoder>
 ```
 
-Key log events:
-- Circuit breaker state changes
-- TfL fetch success/failure
-- CRDT updates received
-- Rate limiting triggered
+Key log events: circuit breaker state changes, TfL fetch success/failure, CRDT updates, rate limiting.
 
-### Distributed Tracing (OpenTelemetry)
+### Distributed Tracing (OpenTelemetry) - TODO
 
-```java
-// Add opentelemetry-javaagent or manual instrumentation
-
-Span span = tracer.spanBuilder("tfl-fetch")
-    .setAttribute("tfl.line", lineId)
-    .startSpan();
-try (Scope scope = span.makeCurrent()) {
-    return tflClient.fetchLine(lineId);
-} finally {
-    span.end();
-}
-```
-
-Trace correlation:
-- Request ID propagated through all components
-- Spans for: HTTP request → CRDT read → TfL fetch → response
+Trace correlation: Request ID propagated through all components.
 
 ---
 
@@ -188,7 +150,6 @@ Trace correlation:
 ### Containerization
 
 ```dockerfile
-# Dockerfile
 FROM eclipse-temurin:21-jre-alpine
 COPY build/libs/tfl-slo-*.jar app.jar
 EXPOSE 8080 2551
@@ -198,7 +159,6 @@ ENTRYPOINT ["java", "-jar", "app.jar"]
 ### Kubernetes
 
 ```yaml
-# deployment.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -242,7 +202,6 @@ spec:
 ### Pekko Cluster Bootstrap (Kubernetes)
 
 ```hocon
-# application.conf for K8s
 pekko.management {
   cluster.bootstrap {
     contact-point-discovery {
@@ -257,34 +216,16 @@ pekko.management {
 
 ## 4. Security
 
-### TLS
-
 | Connection | Current | Production |
 |------------|---------|------------|
-| Client → Service | HTTP | HTTPS (terminate at ingress or service) |
+| Client → Service | HTTP | HTTPS (terminate at ingress) |
 | Service → TfL | HTTPS | HTTPS (already) |
-| Node ↔ Node (Pekko) | Unencrypted | Pekko Artery TLS |
-
-```hocon
-# Pekko cluster TLS
-pekko.remote.artery {
-  transport = tls-tcp
-  ssl.config-ssl-engine {
-    key-store = "/certs/keystore.jks"
-    trust-store = "/certs/truststore.jks"
-  }
-}
-```
-
-### Secrets Management
-
-- TfL API key (if using authenticated endpoints): Kubernetes Secret / Vault
-- TLS certificates: cert-manager / Vault
+| Node ↔ Node | Unencrypted | Pekko Artery TLS |
 
 ### Input Validation
 
 - Line ID: whitelist valid tube line IDs
-- Date range: validate format, reasonable range (not 100 years)
+- Date range: validate format, reasonable range
 - Already have: rate limiting per IP
 
 ---
@@ -302,29 +243,39 @@ pekko.remote.artery {
 
 ### Additional Resilience (TODO)
 
-| Pattern | Purpose | Implementation |
-|---------|---------|----------------|
-| Bulkhead | Isolate TfL calls from serving | Separate thread pool |
-| Graceful shutdown | Drain connections | Pekko coordinated shutdown |
-| Health-based routing | Remove unhealthy nodes | K8s readiness probe |
+| Pattern | Purpose |
+|---------|---------|
+| Bulkhead | Isolate TfL calls from serving |
+| Graceful shutdown | Drain connections (Pekko coordinated shutdown) |
+| Health-based routing | K8s readiness probe |
 
 ### Graceful Degradation Matrix
 
-| Failure | Current Behavior | Production Behavior |
-|---------|------------------|---------------------|
-| TfL down | Serve cache | Same + alert |
-| All peers unreachable | Serve local cache | Same + alert |
-| High memory | OOM crash | Backpressure + GC tuning |
-| High CPU | Slow responses | Autoscaling |
+| Failure | Behavior |
+|---------|----------|
+| TfL down | Serve cache + alert |
+| All peers unreachable | Serve local cache + alert |
+| High memory | Backpressure + GC tuning |
+| High CPU | Autoscaling |
 
 ---
 
-## 6. Performance
+## 6. Runbooks (TODO)
 
-### Benchmarking (TODO)
+| Runbook | Trigger | Actions |
+|---------|---------|---------|
+| TfL API Down | Circuit breaker OPEN > 5min | Check TfL status page, wait |
+| High Latency | p99 > 2s | Check TfL latency, check node health, scale up |
+| Data Stale | Freshness > 10min | Check circuit breaker, check CRDT replication |
+| Node Crash Loop | Pod restart > 3 | Check logs, resources, cluster health |
+
+---
+
+## 7. Performance
+
+### Benchmarking Target
 
 ```bash
-# wrk or k6 load test
 wrk -t4 -c100 -d60s http://localhost:8080/api/v1/tube/status
 ```
 
@@ -333,83 +284,11 @@ Target: 1000 req/s at p99 < 100ms (cache hits)
 ### JVM Tuning
 
 ```bash
-# Production JVM flags
 java -XX:+UseG1GC \
      -XX:MaxGCPauseMillis=100 \
      -Xms256m -Xmx512m \
      -jar app.jar
 ```
-
-### Connection Pooling
-
-- HTTP client: default pool is fine for TfL (low volume)
-- Pekko remoting: already pooled
-
----
-
-## 7. Documentation
-
-### Runbooks (TODO)
-
-| Runbook | Trigger | Actions |
-|---------|---------|---------|
-| TfL API Down | Circuit breaker OPEN > 5min | Check TfL status page, wait or contact TfL |
-| High Latency | p99 > 2s | Check TfL latency, check node health, scale up |
-| Data Stale | Freshness > 10min | Check circuit breaker, check CRDT replication |
-| Node Crash Loop | Pod restart > 3 | Check logs, check resources, check cluster health |
-
-### Architecture Decision Records (ADRs)
-
-Already documented in:
-- `ARCHITECTURE.md` - High-level design
-- `tech_choices.md` - Technology decisions
-- `tradeoffs.md` - Trade-off analysis
-
----
-
-## 8. Compliance / Audit
-
-### Data Handling
-
-- **No PII**: Tube status is public data
-- **No persistence**: Data is ephemeral in memory
-- **TfL Terms**: Respect TfL API terms of service (attribution, rate limits)
-
-### Audit Logging
-
-```java
-// Log all admin operations
-log.info("Config change: {} changed {} from {} to {}",
-    user, setting, oldValue, newValue);
-```
-
----
-
-## 9. Rollout Strategy
-
-### Canary Deployment
-
-```yaml
-# Argo Rollouts or similar
-spec:
-  strategy:
-    canary:
-      steps:
-      - setWeight: 10
-      - pause: {duration: 5m}
-      - setWeight: 50
-      - pause: {duration: 10m}
-      - setWeight: 100
-```
-
-### Feature Flags (Future)
-
-- Historical estimation feature: behind flag
-- New TfL API endpoints: behind flag
-
----
-
-## 10. Cost / Capacity
 
 ### Resource Estimates
 
@@ -419,15 +298,9 @@ spec:
 | 1000 req/s | 3 | 512MB each | 0.5 core |
 | 10000 req/s | 5+ | 1GB each | 1 core |
 
-### TfL API Usage
-
-- 3 nodes × 2 req/min = 6 req/min to TfL
-- Well under any reasonable rate limit
-- Consider authenticated API for higher limits if needed
-
 ---
 
-## Priority Order for Production
+## 8. Priority Order for Production
 
 1. **Metrics** - Can't improve what you can't measure
 2. **Integration tests** - Confidence for refactoring
@@ -440,7 +313,7 @@ spec:
 
 ---
 
-## Not Doing (Explicitly Out of Scope)
+## 9. Not Doing (Explicitly Out of Scope)
 
 | Feature | Why Not |
 |---------|---------|
@@ -448,4 +321,3 @@ spec:
 | Event sourcing | No audit requirement |
 | GraphQL | REST is sufficient |
 | gRPC | No internal service mesh |
-| Custom scheduler | mq-deadline is fine (just kidding, this is Java) |
