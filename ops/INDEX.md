@@ -9,6 +9,7 @@ This folder contains operational documentation for running TfL Tube Status Servi
 | [OBSERVABILITY.md](OBSERVABILITY.md) | Metrics, dashboards, alerting |
 | [DEPLOYMENT.md](DEPLOYMENT.md) | Helm charts, GitOps, rolling upgrades |
 | [SECURITY.md](SECURITY.md) | TLS, network policies, WAF, secrets |
+| [ACCESS_CONTROL.md](ACCESS_CONTROL.md) | AuthN/AuthZ options, Zero Trust, VPN |
 | [INFRASTRUCTURE.md](INFRASTRUCTURE.md) | Terraform, cloud-agnostic, on-prem options |
 | [RUNBOOKS.md](RUNBOOKS.md) | Incident response procedures |
 
