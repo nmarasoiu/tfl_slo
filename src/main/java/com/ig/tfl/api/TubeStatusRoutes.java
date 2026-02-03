@@ -8,6 +8,7 @@ import com.ig.tfl.crdt.TubeStatusReplicator.GetStatus;
 import com.ig.tfl.crdt.TubeStatusReplicator.GetStatusWithFreshness;
 import com.ig.tfl.crdt.TubeStatusReplicator.StatusResponse;
 import com.ig.tfl.model.TubeStatus;
+import com.ig.tfl.observability.Metrics;
 import com.ig.tfl.resilience.RateLimiter;
 import org.apache.pekko.actor.typed.ActorRef;
 import org.apache.pekko.actor.typed.ActorSystem;
@@ -47,12 +48,14 @@ public class TubeStatusRoutes extends AllDirectives {
     private final RateLimiter rateLimiter;
     private final ObjectMapper objectMapper;
     private final Duration askTimeout;
+    private final Metrics metrics;
 
     public TubeStatusRoutes(
             ActorSystem<?> system,
             ActorRef<TubeStatusReplicator.Command> replicator,
-            ActorRef<TflGateway.Command> tflGateway) {
-        this(system, replicator, tflGateway,
+            ActorRef<TflGateway.Command> tflGateway,
+            Metrics metrics) {
+        this(system, replicator, tflGateway, metrics,
                 system.settings().config().getInt("tfl.rate-limit.requests-per-minute"),
                 system.settings().config().getDuration("tfl.http.ask-timeout"));
     }
@@ -61,11 +64,13 @@ public class TubeStatusRoutes extends AllDirectives {
             ActorSystem<?> system,
             ActorRef<TubeStatusReplicator.Command> replicator,
             ActorRef<TflGateway.Command> tflGateway,
+            Metrics metrics,
             int requestsPerMinute,
             Duration askTimeout) {
         this.system = system;
         this.replicator = replicator;
         this.tflGateway = tflGateway;
+        this.metrics = metrics;
         this.rateLimiter = RateLimiter.perMinute(requestsPerMinute);
         this.askTimeout = askTimeout;
         this.objectMapper = new ObjectMapper()
@@ -75,21 +80,45 @@ public class TubeStatusRoutes extends AllDirectives {
     public Route routes() {
         return handleExceptions(exceptionHandler(),
                 () -> handleRejections(rejectionHandler(),
-                        () -> extractClientIP(remoteAddress -> {
-                            String clientIp = remoteAddress.getAddress()
-                                    .map(addr -> addr.getHostAddress())
-                                    .orElse("unknown");
-                            return rateLimitCheck(clientIp, () ->
-                                    pathPrefix("api", () ->
-                                            concat(
-                                                    statusRoutes(),
-                                                    healthRoutes()
+                        () -> concat(
+                                // Metrics endpoint (no rate limiting, no auth)
+                                path("metrics", () ->
+                                        get(() -> complete(StatusCodes.OK, metrics.scrape()))
+                                ),
+                                // API routes with rate limiting and metrics
+                                extractClientIP(remoteAddress -> {
+                                    String clientIp = remoteAddress.getAddress()
+                                            .map(addr -> addr.getHostAddress())
+                                            .orElse("unknown");
+                                    return rateLimitCheck(clientIp, () ->
+                                            pathPrefix("api", () ->
+                                                    extractRequest(request ->
+                                                            withTimedMetrics(request.method().value(),
+                                                                    request.getUri().path(),
+                                                                    () -> concat(
+                                                                            statusRoutes(),
+                                                                            healthRoutes()
+                                                                    ))
+                                                    )
                                             )
-                                    )
-                            );
-                        })
+                                    );
+                                })
+                        )
                 )
         );
+    }
+
+    /**
+     * Wrap route to record request metrics.
+     */
+    private Route withTimedMetrics(String method, String path, Supplier<Route> inner) {
+        long startTime = System.nanoTime();
+        return mapResponse(response -> {
+            long durationNanos = System.nanoTime() - startTime;
+            Duration duration = Duration.ofNanos(durationNanos);
+            metrics.recordRequest(method, path, response.status().intValue(), duration);
+            return response;
+        }, inner);
     }
 
     private Route statusRoutes() {
@@ -205,6 +234,9 @@ public class TubeStatusRoutes extends AllDirectives {
                         Map.of("error", "No data available"),
                         Jackson.marshaller(objectMapper));
             }
+
+            // Record data freshness metric
+            metrics.updateDataFreshness(status.ageMs());
 
             Route result = complete(StatusCodes.OK,
                     toApiResponse(status),

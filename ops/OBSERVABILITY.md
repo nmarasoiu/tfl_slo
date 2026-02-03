@@ -395,31 +395,60 @@ receivers:
 
 ---
 
-## 5. Distributed Tracing (Optional)
+## 5. Distributed Tracing (OpenTelemetry)
 
-For this service, distributed tracing adds limited value because:
-- Single service (no microservice calls)
-- Simple request flow (cache → maybe TfL → response)
-- Low latency (tracing overhead not justified)
+While this is a single service, we trace the **TfL API boundary** to distinguish:
+- Our processing latency vs TfL API latency
+- Retry attempts and their timing
+- HTTP status codes from TfL
 
-If needed for compliance or consistency with other services:
+This is valuable for debugging performance issues and understanding where latency originates.
+
+### Implementation
+
+Manual instrumentation via `com.ig.tfl.observability.Tracing`:
 
 ```java
-// OpenTelemetry auto-instrumentation
-// Add javaagent: -javaagent:opentelemetry-javaagent.jar
-
-// Or manual instrumentation:
-Span span = tracer.spanBuilder("tfl-fetch")
-    .setAttribute("tfl.endpoint", "/Line/Mode/tube/Status")
-    .startSpan();
-try (Scope scope = span.makeCurrent()) {
-    return tflClient.fetchAllLines();
-} finally {
-    span.end();
-}
+// TfL API calls are automatically traced in TflApiClient
+// Each call creates a span with:
+// - Operation name: "tfl-api fetch-all-lines"
+// - Attributes: http.url, http.method, peer.service, http.status_code
+// - Events: retry attempts (if any)
+// - Error recording: exceptions and error status codes
 ```
 
-**Recommendation:** Skip tracing for this service. Metrics + logs are sufficient.
+### Trace ID Correlation
+
+Trace IDs are automatically added to MDC during TfL API calls, appearing in logs:
+
+```
+10:15:30.123 [main] DEBUG TflApiClient [abc123def456.../789xyz...] - Fetching from TfL
+```
+
+### Export Configuration
+
+**Default:** Logging exporter (spans logged to console)
+
+**Production options:**
+- OTLP exporter to Jaeger/Tempo: Add `opentelemetry-exporter-otlp` dependency
+- Configure via env vars: `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`
+
+```bash
+# Example: Export to Jaeger
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
+export OTEL_SERVICE_NAME=tfl-status-service
+```
+
+### When Full Distributed Tracing Would Add More Value
+
+The current implementation traces the TfL API boundary. Consider expanding to full
+request tracing if:
+- Multiple internal services are added (microservices architecture)
+- A database layer is introduced (trace DB queries)
+- Message queues are added (trace async message processing)
+
+For a single service with one external dependency, the current boundary tracing
+provides the key insight (our latency vs TfL latency) without overhead.
 
 ---
 

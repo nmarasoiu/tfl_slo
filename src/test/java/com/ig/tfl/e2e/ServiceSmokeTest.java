@@ -6,6 +6,7 @@ import com.ig.tfl.api.TubeStatusRoutes;
 import com.ig.tfl.client.TflApiClient;
 import com.ig.tfl.client.TflGateway;
 import com.ig.tfl.crdt.TubeStatusReplicator;
+import com.ig.tfl.observability.Metrics;
 import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
 import org.apache.pekko.actor.typed.ActorRef;
@@ -117,6 +118,7 @@ class ServiceSmokeTest {
                 testKit.system(),
                 replicator,
                 tflGateway,
+                new Metrics(),
                 100,  // requests per minute
                 Duration.ofSeconds(5));  // ask timeout
 

@@ -19,8 +19,18 @@ repositories {
 val pekkoVersion = "1.1.2"
 val pekkoHttpVersion = "1.1.0"
 val jacksonVersion = "2.17.0"
+val micrometerVersion = "1.12.0"
+val openTelemetryVersion = "1.34.0"
 
 dependencies {
+    // Metrics (Prometheus)
+    implementation("io.micrometer:micrometer-registry-prometheus:$micrometerVersion")
+
+    // Tracing (OpenTelemetry) - manual instrumentation for TfL API calls
+    implementation("io.opentelemetry:opentelemetry-api:$openTelemetryVersion")
+    implementation("io.opentelemetry:opentelemetry-sdk:$openTelemetryVersion")
+    implementation("io.opentelemetry:opentelemetry-exporter-logging:$openTelemetryVersion")
+
     // Pekko Core
     implementation("org.apache.pekko:pekko-actor-typed_2.13:$pekkoVersion")
     implementation("org.apache.pekko:pekko-cluster-typed_2.13:$pekkoVersion")
@@ -48,6 +58,7 @@ dependencies {
     testImplementation("org.mockito:mockito-core:5.11.0")
     testImplementation("org.wiremock:wiremock:3.4.2")
     testImplementation("org.awaitility:awaitility:4.2.0")
+    testImplementation("io.opentelemetry:opentelemetry-sdk-testing:$openTelemetryVersion")
 
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }

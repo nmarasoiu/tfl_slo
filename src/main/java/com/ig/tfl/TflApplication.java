@@ -4,6 +4,7 @@ import com.ig.tfl.api.TubeStatusRoutes;
 import com.ig.tfl.client.TflApiClient;
 import com.ig.tfl.client.TflGateway;
 import com.ig.tfl.crdt.TubeStatusReplicator;
+import com.ig.tfl.observability.Metrics;
 import com.ig.tfl.resilience.CircuitBreaker;
 import com.ig.tfl.resilience.RetryPolicy;
 import com.typesafe.config.Config;
@@ -62,6 +63,7 @@ public class TflApplication {
         private final int httpPort;
         private final ActorRef<TflGateway.Command> tflGateway;
         private final ActorRef<TubeStatusReplicator.Command> replicator;
+        private final Metrics metrics;
 
         public static Behavior<Command> create(String nodeId, int httpPort) {
             return Behaviors.setup(context -> new GuardianActor(context, nodeId, httpPort));
@@ -74,10 +76,19 @@ public class TflApplication {
 
             Config config = context.getSystem().settings().config();
 
+            // Create metrics registry
+            this.metrics = new Metrics();
+
             // Create resilience components from config
             int cbFailureThreshold = config.getInt("tfl.circuit-breaker.failure-threshold");
             Duration cbOpenDuration = config.getDuration("tfl.circuit-breaker.open-duration");
             CircuitBreaker circuitBreaker = new CircuitBreaker("tfl-api", cbFailureThreshold, cbOpenDuration);
+
+            // Register circuit breaker metric
+            metrics.registerCircuitBreaker("tfl-api", circuitBreaker::getState);
+
+            // Register data freshness metric
+            metrics.registerDataFreshness(nodeId);
 
             int retryMaxRetries = config.getInt("tfl.retry.max-retries");
             Duration retryBaseDelay = config.getDuration("tfl.retry.base-delay");
@@ -132,7 +143,7 @@ public class TflApplication {
 
         private void startHttpServer(ActorSystem<?> system) {
             // Routes talk to Replicator (for cached status) and TflGateway (for date-range queries)
-            TubeStatusRoutes routes = new TubeStatusRoutes(system, replicator, tflGateway);
+            TubeStatusRoutes routes = new TubeStatusRoutes(system, replicator, tflGateway, metrics);
 
             CompletionStage<ServerBinding> binding = Http.get(system)
                     .newServerAt("0.0.0.0", httpPort)

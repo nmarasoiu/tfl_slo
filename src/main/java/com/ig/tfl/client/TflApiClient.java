@@ -6,6 +6,7 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.ig.tfl.model.TflApiResponse;
 import com.ig.tfl.model.TubeStatus;
 import com.ig.tfl.model.TubeStatus.LineStatus;
+import com.ig.tfl.observability.Tracing;
 import com.ig.tfl.resilience.CircuitBreaker;
 import com.ig.tfl.resilience.RetryPolicy;
 import org.apache.pekko.actor.typed.ActorSystem;
@@ -42,6 +43,7 @@ public class TflApiClient implements TflClient {
     private final ObjectMapper objectMapper;
     private final CircuitBreaker circuitBreaker;
     private final RetryPolicy retryPolicy;
+    private final Tracing tracing;
     private final String nodeId;
     private final String baseUrl;
     private final Duration responseTimeout;
@@ -50,24 +52,32 @@ public class TflApiClient implements TflClient {
         this(system, nodeId, DEFAULT_TFL_BASE_URL,
                 CircuitBreaker.withDefaults("tfl-api"),
                 RetryPolicy.defaults(),
-                DEFAULT_RESPONSE_TIMEOUT);
+                DEFAULT_RESPONSE_TIMEOUT,
+                new Tracing());
     }
 
     public TflApiClient(ActorSystem<?> system, String nodeId, String baseUrl) {
         this(system, nodeId, baseUrl,
                 CircuitBreaker.withDefaults("tfl-api"),
                 RetryPolicy.defaults(),
-                DEFAULT_RESPONSE_TIMEOUT);
+                DEFAULT_RESPONSE_TIMEOUT,
+                new Tracing());
     }
 
     public TflApiClient(ActorSystem<?> system, String nodeId, String baseUrl,
                         CircuitBreaker circuitBreaker, RetryPolicy retryPolicy) {
-        this(system, nodeId, baseUrl, circuitBreaker, retryPolicy, DEFAULT_RESPONSE_TIMEOUT);
+        this(system, nodeId, baseUrl, circuitBreaker, retryPolicy, DEFAULT_RESPONSE_TIMEOUT, new Tracing());
     }
 
     public TflApiClient(ActorSystem<?> system, String nodeId, String baseUrl,
                         CircuitBreaker circuitBreaker, RetryPolicy retryPolicy,
                         Duration responseTimeout) {
+        this(system, nodeId, baseUrl, circuitBreaker, retryPolicy, responseTimeout, new Tracing());
+    }
+
+    public TflApiClient(ActorSystem<?> system, String nodeId, String baseUrl,
+                        CircuitBreaker circuitBreaker, RetryPolicy retryPolicy,
+                        Duration responseTimeout, Tracing tracing) {
         this.system = system;
         this.nodeId = nodeId;
         this.baseUrl = baseUrl;
@@ -78,24 +88,34 @@ public class TflApiClient implements TflClient {
         this.circuitBreaker = circuitBreaker;
         this.retryPolicy = retryPolicy;
         this.responseTimeout = responseTimeout;
+        this.tracing = tracing;
     }
 
     /**
      * Fetch all tube line statuses (async, non-blocking).
+     * Traced via OpenTelemetry to measure TfL API latency separately.
      */
     public CompletionStage<TubeStatus> fetchAllLinesAsync() {
-        return retryPolicy.executeAsync(() ->
-                executeWithCircuitBreaker(() -> doFetchAllLines()));
+        String url = baseUrl + "/Line/Mode/tube/Status";
+        return tracing.traceTflCallAsync("fetch-all-lines", url, () ->
+                retryPolicy.executeAsync(() ->
+                        executeWithCircuitBreaker(this::doFetchAllLines)));
     }
 
     /**
      * Fetch status for a specific line with date range (async, non-blocking).
      * Used for future/planned disruptions - bypasses cache, goes direct to TfL.
+     * Traced via OpenTelemetry to measure TfL API latency separately.
      */
     @Override
     public CompletionStage<TubeStatus> fetchLineStatusAsync(String lineId, LocalDate from, LocalDate to) {
-        return retryPolicy.executeAsync(() ->
-                executeWithCircuitBreaker(() -> doFetchLineStatus(lineId, from, to)));
+        String url = String.format("%s/Line/%s/Status/%s/to/%s",
+                baseUrl, lineId,
+                from.format(DateTimeFormatter.ISO_LOCAL_DATE),
+                to.format(DateTimeFormatter.ISO_LOCAL_DATE));
+        return tracing.traceTflCallAsync("fetch-line-" + lineId, url, () ->
+                retryPolicy.executeAsync(() ->
+                        executeWithCircuitBreaker(() -> doFetchLineStatus(lineId, from, to))));
     }
 
     // Circuit breaker wrapper
@@ -155,6 +175,9 @@ public class TflApiClient implements TflClient {
     private <T> CompletionStage<T> handleResponse(HttpResponse response, TypeReference<T> typeRef) {
         int status = response.status().intValue();
         log.debug("TfL response status: {}", status);
+
+        // Record HTTP status in trace span
+        tracing.recordHttpStatus(status);
 
         if (status >= 400) {
             // Drain the entity to free connection

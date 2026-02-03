@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ig.tfl.client.TflGateway;
 import com.ig.tfl.crdt.TubeStatusReplicator;
 import com.ig.tfl.model.TubeStatus;
+import com.ig.tfl.observability.Metrics;
 import com.ig.tfl.resilience.CircuitBreaker;
 import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
@@ -102,6 +103,7 @@ class TubeStatusRoutesTest {
                 testKit.system(),
                 replicator,
                 gateway,
+                new Metrics(),
                 100,  // requests per minute
                 Duration.ofSeconds(5));  // ask timeout
 
@@ -272,6 +274,26 @@ class TubeStatusRoutesTest {
         assertThat(json.get("status").asText()).isEqualTo("ready");
         assertThat(json.has("dataAgeMs")).isTrue();
         assertThat(json.has("circuit")).isTrue();
+    }
+
+    @Test
+    void metricsEndpoint_returnsPrometheusFormat() throws Exception {
+        // Make a few requests first to generate metrics
+        get("/api/v1/tube/status");
+        get("/api/health/live");
+
+        HttpResponse response = get("/metrics");
+        assertThat(response.status().intValue()).isEqualTo(200);
+
+        String body = getBody(response);
+
+        // Verify Prometheus format
+        assertThat(body).contains("# HELP");
+        assertThat(body).contains("# TYPE");
+
+        // Verify our custom metrics are present
+        assertThat(body).contains("http_requests_total");
+        assertThat(body).contains("http_request_duration_seconds");
     }
 
     private HttpResponse get(String path) throws Exception {
