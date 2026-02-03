@@ -2,6 +2,7 @@ package com.ig.tfl;
 
 import com.ig.tfl.api.TubeStatusRoutes;
 import com.ig.tfl.client.TflApiClient;
+import com.ig.tfl.client.TflGateway;
 import com.ig.tfl.crdt.TubeStatusReplicator;
 import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
@@ -25,6 +26,7 @@ import java.util.concurrent.CompletionStage;
  *
  * Starts:
  * - Pekko Actor System with cluster support
+ * - TflGateway actor (TfL API communication)
  * - CRDT-replicated tube status actor
  * - HTTP server for REST API
  */
@@ -56,7 +58,7 @@ public class TflApplication {
 
         private final String nodeId;
         private final int httpPort;
-        private final TflApiClient tflClient;
+        private final ActorRef<TflGateway.Command> tflGateway;
         private final ActorRef<TubeStatusReplicator.Command> replicator;
 
         public static Behavior<Command> create(String nodeId, int httpPort) {
@@ -68,13 +70,18 @@ public class TflApplication {
             this.nodeId = nodeId;
             this.httpPort = httpPort;
 
-            // Create TfL client (needs ActorSystem for Pekko HTTP)
-            this.tflClient = new TflApiClient(context.getSystem(), nodeId);
+            // Create TfL API client (non-actor, used by TflGateway)
+            TflApiClient tflApiClient = new TflApiClient(context.getSystem(), nodeId);
 
-            // Create CRDT replicator actor
+            // Create TflGateway actor - single point of contact for TfL API
+            this.tflGateway = context.spawn(
+                    TflGateway.create(tflApiClient),
+                    "tfl-gateway");
+
+            // Create CRDT replicator actor - uses TflGateway for fetches
             this.replicator = context.spawn(
                     TubeStatusReplicator.create(
-                            tflClient,
+                            tflGateway,
                             nodeId,
                             Duration.ofSeconds(30),  // refresh interval
                             Duration.ofSeconds(5)    // recent enough threshold
@@ -97,7 +104,8 @@ public class TflApplication {
         }
 
         private void startHttpServer(ActorSystem<?> system) {
-            TubeStatusRoutes routes = new TubeStatusRoutes(system, replicator, tflClient, tflClient::getCircuitState);
+            // Routes talk to Replicator (for cached status) and TflGateway (for date-range queries)
+            TubeStatusRoutes routes = new TubeStatusRoutes(system, replicator, tflGateway);
 
             CompletionStage<ServerBinding> binding = Http.get(system)
                     .newServerAt("0.0.0.0", httpPort)

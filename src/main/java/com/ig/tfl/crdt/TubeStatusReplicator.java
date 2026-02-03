@@ -1,6 +1,6 @@
 package com.ig.tfl.crdt;
 
-import com.ig.tfl.client.TflClient;
+import com.ig.tfl.client.TflGateway;
 import com.ig.tfl.model.TubeStatus;
 import org.apache.pekko.actor.typed.ActorRef;
 import org.apache.pekko.actor.typed.Behavior;
@@ -15,14 +15,15 @@ import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
+import java.util.LinkedList;
+import java.util.Queue;
 
 /**
- * Actor that manages CRDT-replicated tube status.
+ * Actor that manages CRDT-replicated tube status with freshness logic.
  *
  * Uses Pekko Distributed Data with LWWRegister for tube status.
- * Implements scatter-gather: queries peers and TfL, takes freshest.
+ * Handles freshness requirements from HTTP layer - Routes no longer
+ * make caching decisions.
  */
 public class TubeStatusReplicator extends AbstractBehavior<TubeStatusReplicator.Command> {
     private static final Logger log = LoggerFactory.getLogger(TubeStatusReplicator.class);
@@ -31,27 +32,63 @@ public class TubeStatusReplicator extends AbstractBehavior<TubeStatusReplicator.
     private static final Key<LWWRegister<TubeStatus>> STATUS_KEY =
             LWWRegisterKey.create("tube-status");
 
+    // Soft threshold: trigger background refresh if data older than this
+    private static final long BACKGROUND_REFRESH_THRESHOLD_MS = 5_000;
+
     // Configuration
     private final Duration refreshInterval;
     private final Duration recentEnoughThreshold;
-    private final Duration scatterGatherTimeout;
     private final String nodeId;
 
     // Dependencies
-    private final TflClient tflClient;
+    private final ActorRef<TflGateway.Command> tflGateway;
     private final ReplicatorMessageAdapter<Command, LWWRegister<TubeStatus>> replicatorAdapter;
     private final SelfCluster selfCluster;
 
     // Current cached status
     private TubeStatus currentStatus;
 
+    // Pending freshness requests waiting for TfL response
+    private final Queue<PendingFreshnessRequest> pendingFreshnessRequests = new LinkedList<>();
+
+    private record PendingFreshnessRequest(
+            Long maxAgeMs,
+            ActorRef<StatusResponse> replyTo
+    ) {}
+
     // Message types
     public sealed interface Command {}
 
     public record RefreshTick() implements Command {}
+
+    /**
+     * Get current cached status (no freshness requirement).
+     */
     public record GetStatus(ActorRef<StatusResponse> replyTo) implements Command {}
-    public record TriggerBackgroundRefresh() implements Command {}  // Fire-and-forget refresh
-    public record StatusResponse(TubeStatus status) {}
+
+    /**
+     * Get status with freshness requirement.
+     * If cache is stale (older than maxAgeMs), will attempt TfL fetch.
+     * If TfL fails, returns stale data with isStale=true.
+     */
+    public record GetStatusWithFreshness(
+            Long maxAgeMs,  // null = no requirement (same as GetStatus)
+            ActorRef<StatusResponse> replyTo
+    ) implements Command {}
+
+    /**
+     * Fire-and-forget background refresh trigger.
+     */
+    public record TriggerBackgroundRefresh() implements Command {}
+
+    /**
+     * Response with freshness metadata.
+     */
+    public record StatusResponse(
+            TubeStatus status,
+            boolean isStale,        // true if data older than requested maxAgeMs
+            Long requestedMaxAgeMs  // echo back for headers (null if no requirement)
+    ) {}
 
     // Internal messages
     private record InternalGetResponse(
@@ -65,30 +102,29 @@ public class TubeStatusReplicator extends AbstractBehavior<TubeStatusReplicator.
     private record TflFetchComplete(TubeStatus status, Throwable error) implements Command {}
 
     public static Behavior<Command> create(
-            TflClient tflClient,
+            ActorRef<TflGateway.Command> tflGateway,
             String nodeId,
             Duration refreshInterval,
             Duration recentEnoughThreshold) {
         return Behaviors.setup(context ->
                 Behaviors.withTimers(timers ->
-                        new TubeStatusReplicator(context, timers, tflClient, nodeId,
+                        new TubeStatusReplicator(context, timers, tflGateway, nodeId,
                                 refreshInterval, recentEnoughThreshold)));
     }
 
     private TubeStatusReplicator(
             ActorContext<Command> context,
             TimerScheduler<Command> timers,
-            TflClient tflClient,
+            ActorRef<TflGateway.Command> tflGateway,
             String nodeId,
             Duration refreshInterval,
             Duration recentEnoughThreshold) {
         super(context);
 
-        this.tflClient = tflClient;
+        this.tflGateway = tflGateway;
         this.nodeId = nodeId;
         this.refreshInterval = refreshInterval;
         this.recentEnoughThreshold = recentEnoughThreshold;
-        this.scatterGatherTimeout = Duration.ofSeconds(2);
         this.selfCluster = SelfCluster.get(context.getSystem());
 
         // Set up replicator adapter for distributed data
@@ -113,6 +149,7 @@ public class TubeStatusReplicator extends AbstractBehavior<TubeStatusReplicator.
         return newReceiveBuilder()
                 .onMessage(RefreshTick.class, this::onRefreshTick)
                 .onMessage(GetStatus.class, this::onGetStatus)
+                .onMessage(GetStatusWithFreshness.class, this::onGetStatusWithFreshness)
                 .onMessage(TriggerBackgroundRefresh.class, this::onTriggerBackgroundRefresh)
                 .onMessage(InternalGetResponse.class, this::onInternalGetResponse)
                 .onMessage(InternalUpdateResponse.class, this::onInternalUpdateResponse)
@@ -120,8 +157,54 @@ public class TubeStatusReplicator extends AbstractBehavior<TubeStatusReplicator.
                 .build();
     }
 
+    private Behavior<Command> onGetStatus(GetStatus msg) {
+        // Simple case: no freshness requirement
+        msg.replyTo().tell(new StatusResponse(currentStatus, false, null));
+        return this;
+    }
+
+    private Behavior<Command> onGetStatusWithFreshness(GetStatusWithFreshness msg) {
+        // No freshness requirement = same as GetStatus
+        if (msg.maxAgeMs() == null) {
+            msg.replyTo().tell(new StatusResponse(currentStatus, false, null));
+            return this;
+        }
+
+        // No data at all
+        if (currentStatus == null) {
+            msg.replyTo().tell(new StatusResponse(null, false, msg.maxAgeMs()));
+            return this;
+        }
+
+        // Cache is fresh enough
+        if (currentStatus.ageMs() <= msg.maxAgeMs()) {
+            // Check soft threshold for proactive refresh
+            if (currentStatus.ageMs() > BACKGROUND_REFRESH_THRESHOLD_MS) {
+                log.debug("Data is {}ms old (> {}ms soft threshold) - triggering background refresh",
+                        currentStatus.ageMs(), BACKGROUND_REFRESH_THRESHOLD_MS);
+                fetchFromTfl();
+            }
+            msg.replyTo().tell(new StatusResponse(currentStatus, false, msg.maxAgeMs()));
+            return this;
+        }
+
+        // Cache too stale - attempt TfL fetch
+        log.info("Cache is {}ms old, client wants max {}ms - attempting TfL fetch",
+                currentStatus.ageMs(), msg.maxAgeMs());
+
+        // Queue this request to be answered when TfL responds
+        pendingFreshnessRequests.add(new PendingFreshnessRequest(msg.maxAgeMs(), msg.replyTo()));
+
+        // Only fetch if this is the first pending request (avoid duplicate fetches)
+        if (pendingFreshnessRequests.size() == 1) {
+            fetchFromTfl();
+        }
+
+        return this;
+    }
+
     private Behavior<Command> onTriggerBackgroundRefresh(TriggerBackgroundRefresh msg) {
-        log.debug("Background refresh triggered by HTTP layer");
+        log.debug("Background refresh triggered");
         fetchFromTfl();
         return this;
     }
@@ -167,33 +250,33 @@ public class TubeStatusReplicator extends AbstractBehavior<TubeStatusReplicator.
     }
 
     private void fetchFromTfl() {
-        // Pekko HTTP is non-blocking, just pipe result back to actor
-        tflClient.fetchAllLinesAsync()
-                .whenComplete((status, error) ->
-                        getContext().getSelf().tell(new TflFetchComplete(status, error)));
+        // Create adapter to receive response
+        ActorRef<TflGateway.FetchResponse> responseAdapter = getContext().messageAdapter(
+                TflGateway.FetchResponse.class,
+                resp -> new TflFetchComplete(resp.status(), resp.error()));
+
+        tflGateway.tell(new TflGateway.FetchAllLines(responseAdapter));
     }
 
     private Behavior<Command> onTflFetchComplete(TflFetchComplete msg) {
         if (msg.error() != null) {
             log.error("Failed to fetch from TfL: {}", msg.error().getMessage());
-            // Keep serving stale data if we have any
+
+            // Answer pending requests with stale data
+            answerPendingRequestsWithStaleData();
             return this;
         }
 
         TubeStatus freshStatus = msg.status();
         log.info("Got fresh data from TfL, {} lines, updating CRDT", freshStatus.lines().size());
 
-        // Update local cache IMMEDIATELY - HTTP responses don't wait for CRDT
+        // Update local cache IMMEDIATELY
         currentStatus = freshStatus;
 
+        // Answer pending freshness requests with fresh data
+        answerPendingRequestsWithFreshData();
+
         // Write to CRDT with WriteMajority for aggressive replication
-        // This is async - we don't block, but majority of nodes will have data
-        // within ~200ms (gossip interval). Falls back to eventual consistency
-        // if majority unreachable (partition).
-        //
-        // Multi-DC note: WriteMajority counts ALL nodes across DCs.
-        // For DC-locality, use WriteMajorityPlus(timeout, minCap) which ensures
-        // majority from local DC + additional from remote DCs.
         replicatorAdapter.askUpdate(
                 askReplyTo -> new Replicator.Update<>(
                         STATUS_KEY,
@@ -208,9 +291,22 @@ public class TubeStatusReplicator extends AbstractBehavior<TubeStatusReplicator.
         return this;
     }
 
+    private void answerPendingRequestsWithFreshData() {
+        while (!pendingFreshnessRequests.isEmpty()) {
+            PendingFreshnessRequest req = pendingFreshnessRequests.poll();
+            req.replyTo().tell(new StatusResponse(currentStatus, false, req.maxAgeMs()));
+        }
+    }
+
+    private void answerPendingRequestsWithStaleData() {
+        while (!pendingFreshnessRequests.isEmpty()) {
+            PendingFreshnessRequest req = pendingFreshnessRequests.poll();
+            // Return stale data with isStale=true so Routes can add warning headers
+            req.replyTo().tell(new StatusResponse(currentStatus, true, req.maxAgeMs()));
+        }
+    }
+
     private Behavior<Command> onInternalUpdateResponse(InternalUpdateResponse msg) {
-        // AP system: WriteMajority is best-effort optimization, not a requirement.
-        // Data is already in local cache and will spread via gossip eventually.
         if (msg.response() instanceof Replicator.UpdateSuccess<?>) {
             log.debug("CRDT write replicated to majority");
         } else if (msg.response() instanceof Replicator.UpdateTimeout<?>) {
@@ -218,16 +314,6 @@ public class TubeStatusReplicator extends AbstractBehavior<TubeStatusReplicator.
         } else {
             log.debug("CRDT write result: {} - local cache serving, gossip will propagate",
                     msg.response().getClass().getSimpleName());
-        }
-        return this;
-    }
-
-    private Behavior<Command> onGetStatus(GetStatus msg) {
-        if (currentStatus != null) {
-            msg.replyTo().tell(new StatusResponse(currentStatus));
-        } else {
-            // No data yet, return empty with degraded confidence
-            msg.replyTo().tell(new StatusResponse(null));
         }
         return this;
     }

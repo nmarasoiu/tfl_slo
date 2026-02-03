@@ -1,21 +1,26 @@
 package com.ig.tfl.crdt;
 
-import com.ig.tfl.client.TflClient;
+import com.ig.tfl.client.TflGateway;
 import com.ig.tfl.model.TubeStatus;
 import com.ig.tfl.resilience.CircuitBreaker;
 import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
 import org.apache.pekko.actor.testkit.typed.javadsl.ActorTestKit;
 import org.apache.pekko.actor.testkit.typed.javadsl.TestProbe;
+import org.apache.pekko.actor.typed.ActorRef;
+import org.apache.pekko.actor.typed.Behavior;
+import org.apache.pekko.actor.typed.javadsl.AbstractBehavior;
+import org.apache.pekko.actor.typed.javadsl.ActorContext;
+import org.apache.pekko.actor.typed.javadsl.Behaviors;
+import org.apache.pekko.actor.typed.javadsl.Receive;
 import org.junit.jupiter.api.*;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.time.LocalDate;
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionStage;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 
 import static org.assertj.core.api.Assertions.*;
 import static org.awaitility.Awaitility.await;
@@ -25,7 +30,7 @@ import java.util.concurrent.TimeUnit;
  * Integration tests for TubeStatusReplicator actor.
  *
  * Uses Pekko ActorTestKit with a cluster-enabled system.
- * The TflApiClient is stubbed to return known data.
+ * The TflGateway is stubbed to return known data.
  */
 class TubeStatusReplicatorTest {
 
@@ -70,10 +75,10 @@ class TubeStatusReplicatorTest {
 
     @Test
     void returnsNullWhenNoDataAvailable() {
-        var stubClient = new StubTflClient(null);
+        var gateway = testKit.spawn(StubTflGateway.create(() -> null));
         var replicator = testKit.spawn(
                 TubeStatusReplicator.create(
-                        stubClient,
+                        gateway,
                         "test-node",
                         Duration.ofHours(1),  // Long refresh interval
                         Duration.ofSeconds(5)));
@@ -90,12 +95,11 @@ class TubeStatusReplicatorTest {
 
     @Test
     void returnsStatusAfterRefresh() {
-        var sampleStatus = createSampleStatus();
-        var stubClient = new StubTflClient(sampleStatus);
+        var gateway = testKit.spawn(StubTflGateway.create(TubeStatusReplicatorTest::createSampleStatus));
 
         var replicator = testKit.spawn(
                 TubeStatusReplicator.create(
-                        stubClient,
+                        gateway,
                         "test-node",
                         Duration.ofMillis(100),  // Fast refresh
                         Duration.ofSeconds(30)));
@@ -114,17 +118,14 @@ class TubeStatusReplicatorTest {
     @Test
     void fetchesFromTflOnRefreshTick() {
         var fetchCount = new AtomicInteger(0);
-        var stubClient = new StubTflClient(createSampleStatus()) {
-            @Override
-            public CompletionStage<TubeStatus> fetchAllLinesAsync() {
-                fetchCount.incrementAndGet();
-                return super.fetchAllLinesAsync();
-            }
-        };
+        var gateway = testKit.spawn(StubTflGateway.create(() -> {
+            fetchCount.incrementAndGet();
+            return createSampleStatus();
+        }));
 
         testKit.spawn(
                 TubeStatusReplicator.create(
-                        stubClient,
+                        gateway,
                         "test-node",
                         Duration.ofMillis(100),  // 100ms refresh
                         Duration.ofMillis(50)));  // 50ms freshness - data is always stale
@@ -136,17 +137,12 @@ class TubeStatusReplicatorTest {
 
     @Test
     void handlesApiFailureGracefully() throws InterruptedException {
-        var failingClient = new StubTflClient(null) {
-            @Override
-            public CompletionStage<TubeStatus> fetchAllLinesAsync() {
-                return CompletableFuture.failedFuture(
-                        new RuntimeException("TfL API unavailable"));
-            }
-        };
+        var gateway = testKit.spawn(StubTflGateway.createFailing(
+                new RuntimeException("TfL API unavailable")));
 
         var replicator = testKit.spawn(
                 TubeStatusReplicator.create(
-                        failingClient,
+                        gateway,
                         "test-node",
                         Duration.ofMillis(100),
                         Duration.ofSeconds(5)));
@@ -167,11 +163,11 @@ class TubeStatusReplicatorTest {
 
     @Test
     void respondsToMultipleConcurrentRequests() throws InterruptedException {
-        var stubClient = new StubTflClient(createSampleStatus());
+        var gateway = testKit.spawn(StubTflGateway.create(TubeStatusReplicatorTest::createSampleStatus));
 
         var replicator = testKit.spawn(
                 TubeStatusReplicator.create(
-                        stubClient,
+                        gateway,
                         "test-node",
                         Duration.ofMillis(50),
                         Duration.ofSeconds(30)));
@@ -195,7 +191,80 @@ class TubeStatusReplicatorTest {
         }
     }
 
-    private TubeStatus createSampleStatus() {
+    @Test
+    void getStatusWithFreshness_returnsFreshDataWhenCacheIsFreshEnough() throws InterruptedException {
+        var gateway = testKit.spawn(StubTflGateway.create(TubeStatusReplicatorTest::createSampleStatus));
+
+        var replicator = testKit.spawn(
+                TubeStatusReplicator.create(
+                        gateway,
+                        "test-node",
+                        Duration.ofMillis(50),
+                        Duration.ofSeconds(30)));
+
+        // Wait for initial data
+        await().atMost(5, TimeUnit.SECONDS).untilAsserted(() -> {
+            TestProbe<TubeStatusReplicator.StatusResponse> p = testKit.createTestProbe();
+            replicator.tell(new TubeStatusReplicator.GetStatus(p.ref()));
+            assertThat(p.receiveMessage(Duration.ofSeconds(2)).status()).isNotNull();
+        });
+
+        // Request with high maxAgeMs - cache should be fresh enough
+        TestProbe<TubeStatusReplicator.StatusResponse> probe = testKit.createTestProbe();
+        replicator.tell(new TubeStatusReplicator.GetStatusWithFreshness(60000L, probe.ref()));
+
+        var response = probe.receiveMessage(Duration.ofSeconds(5));
+        assertThat(response.status()).isNotNull();
+        assertThat(response.isStale()).isFalse();
+        assertThat(response.requestedMaxAgeMs()).isEqualTo(60000L);
+    }
+
+    @Test
+    void getStatusWithFreshness_returnsStaleDataWhenTflFails() throws InterruptedException {
+        // Use a controllable flag instead of fetch count to avoid CRDT pollution issues
+        var shouldSucceed = new AtomicBoolean(true);
+        var gateway = testKit.spawn(StubTflGateway.create(() -> {
+            if (shouldSucceed.get()) {
+                return createSampleStatus();
+            }
+            throw new RuntimeException("TfL API unavailable");
+        }));
+
+        var replicator = testKit.spawn(
+                TubeStatusReplicator.create(
+                        gateway,
+                        "test-node",
+                        Duration.ofHours(1),  // Don't auto-refresh
+                        Duration.ofSeconds(30)));
+
+        // Manually trigger initial fetch to ensure we control when it happens
+        replicator.tell(new TubeStatusReplicator.TriggerBackgroundRefresh());
+
+        // Wait for initial data
+        await().atMost(5, TimeUnit.SECONDS).untilAsserted(() -> {
+            TestProbe<TubeStatusReplicator.StatusResponse> p = testKit.createTestProbe();
+            replicator.tell(new TubeStatusReplicator.GetStatus(p.ref()));
+            assertThat(p.receiveMessage(Duration.ofSeconds(2)).status()).isNotNull();
+        });
+
+        // Now make TfL fail for subsequent fetches
+        shouldSucceed.set(false);
+
+        // Wait a bit so data becomes "old"
+        Thread.sleep(100);
+
+        // Request with maxAgeMs=0 - cache is always stale, triggers fetch which fails
+        TestProbe<TubeStatusReplicator.StatusResponse> probe = testKit.createTestProbe();
+        replicator.tell(new TubeStatusReplicator.GetStatusWithFreshness(0L, probe.ref()));
+
+        var response = probe.receiveMessage(Duration.ofSeconds(5));
+        // Should return stale data with isStale=true
+        assertThat(response.status()).isNotNull();
+        assertThat(response.isStale()).isTrue();
+        assertThat(response.requestedMaxAgeMs()).isEqualTo(0L);
+    }
+
+    private static TubeStatus createSampleStatus() {
         return new TubeStatus(
                 List.of(new TubeStatus.LineStatus(
                         "victoria",
@@ -210,47 +279,72 @@ class TubeStatusReplicatorTest {
     }
 
     /**
-     * Stub TflClient for testing.
+     * Stub TflGateway actor for testing.
      */
-    static class StubTflClient implements TflClient {
-        private final TubeStatus stubStatus;
+    static class StubTflGateway extends AbstractBehavior<TflGateway.Command> {
+        private final Supplier<TubeStatus> statusSupplier;
+        private final Throwable failWith;
 
-        StubTflClient(TubeStatus stubStatus) {
-            this.stubStatus = stubStatus;
+        static Behavior<TflGateway.Command> create(Supplier<TubeStatus> statusSupplier) {
+            return Behaviors.setup(ctx -> new StubTflGateway(ctx, statusSupplier, null));
+        }
+
+        static Behavior<TflGateway.Command> createFailing(Throwable error) {
+            return Behaviors.setup(ctx -> new StubTflGateway(ctx, () -> null, error));
+        }
+
+        private StubTflGateway(ActorContext<TflGateway.Command> context,
+                               Supplier<TubeStatus> statusSupplier,
+                               Throwable failWith) {
+            super(context);
+            this.statusSupplier = statusSupplier;
+            this.failWith = failWith;
         }
 
         @Override
-        public CompletionStage<TubeStatus> fetchAllLinesAsync() {
-            if (stubStatus == null) {
-                return CompletableFuture.completedFuture(null);
+        public Receive<TflGateway.Command> createReceive() {
+            return newReceiveBuilder()
+                    .onMessage(TflGateway.FetchAllLines.class, this::onFetchAllLines)
+                    .onMessage(TflGateway.FetchLineWithDateRange.class, this::onFetchLineWithDateRange)
+                    .onMessage(TflGateway.GetCircuitState.class, this::onGetCircuitState)
+                    .build();
+        }
+
+        private Behavior<TflGateway.Command> onFetchAllLines(TflGateway.FetchAllLines msg) {
+            if (failWith != null) {
+                msg.replyTo().tell(new TflGateway.FetchResponse(null, failWith));
+            } else {
+                try {
+                    TubeStatus status = statusSupplier.get();
+                    msg.replyTo().tell(new TflGateway.FetchResponse(status, null));
+                } catch (Exception e) {
+                    msg.replyTo().tell(new TflGateway.FetchResponse(null, e));
+                }
             }
-            // Return fresh status with current timestamp
-            return CompletableFuture.completedFuture(new TubeStatus(
-                    stubStatus.lines(),
-                    Instant.now(),
-                    stubStatus.queriedBy()
-            ));
+            return this;
         }
 
-        @Override
-        public CompletionStage<TubeStatus> fetchLineStatusAsync(String lineId, LocalDate from, LocalDate to) {
-            if (stubStatus == null) {
-                return CompletableFuture.completedFuture(null);
+        private Behavior<TflGateway.Command> onFetchLineWithDateRange(TflGateway.FetchLineWithDateRange msg) {
+            if (failWith != null) {
+                msg.replyTo().tell(new TflGateway.FetchResponse(null, failWith));
+            } else {
+                TubeStatus status = statusSupplier.get();
+                if (status != null) {
+                    var filtered = status.lines().stream()
+                            .filter(line -> line.id().equalsIgnoreCase(msg.lineId()))
+                            .toList();
+                    msg.replyTo().tell(new TflGateway.FetchResponse(
+                            new TubeStatus(filtered, Instant.now(), status.queriedBy()), null));
+                } else {
+                    msg.replyTo().tell(new TflGateway.FetchResponse(null, null));
+                }
             }
-            // Filter to matching line
-            var filtered = stubStatus.lines().stream()
-                    .filter(line -> line.id().equalsIgnoreCase(lineId))
-                    .toList();
-            return CompletableFuture.completedFuture(new TubeStatus(
-                    filtered,
-                    Instant.now(),
-                    stubStatus.queriedBy()
-            ));
+            return this;
         }
 
-        @Override
-        public CircuitBreaker.State getCircuitState() {
-            return CircuitBreaker.State.CLOSED;
+        private Behavior<TflGateway.Command> onGetCircuitState(TflGateway.GetCircuitState msg) {
+            msg.replyTo().tell(new TflGateway.CircuitStateResponse(CircuitBreaker.State.CLOSED));
+            return this;
         }
     }
 }

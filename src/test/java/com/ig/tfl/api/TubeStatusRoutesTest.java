@@ -2,7 +2,7 @@ package com.ig.tfl.api;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.ig.tfl.client.TflClient;
+import com.ig.tfl.client.TflGateway;
 import com.ig.tfl.crdt.TubeStatusReplicator;
 import com.ig.tfl.model.TubeStatus;
 import com.ig.tfl.resilience.CircuitBreaker;
@@ -10,6 +10,11 @@ import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
 import org.apache.pekko.actor.testkit.typed.javadsl.ActorTestKit;
 import org.apache.pekko.actor.typed.ActorRef;
+import org.apache.pekko.actor.typed.Behavior;
+import org.apache.pekko.actor.typed.javadsl.AbstractBehavior;
+import org.apache.pekko.actor.typed.javadsl.ActorContext;
+import org.apache.pekko.actor.typed.javadsl.Behaviors;
+import org.apache.pekko.actor.typed.javadsl.Receive;
 import org.apache.pekko.http.javadsl.Http;
 import org.apache.pekko.http.javadsl.ServerBinding;
 import org.apache.pekko.http.javadsl.model.HttpRequest;
@@ -21,10 +26,8 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionStage;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 import static org.assertj.core.api.Assertions.*;
 import static org.awaitility.Awaitility.await;
@@ -37,7 +40,7 @@ class TubeStatusRoutesTest {
 
     private static ActorTestKit testKit;
     private static ActorRef<TubeStatusReplicator.Command> replicator;
-    private static StubTflClient stubClient;
+    private static ActorRef<TflGateway.Command> gateway;
     private static ServerBinding serverBinding;
     private static String baseUrl;
     private static Http http;
@@ -72,13 +75,15 @@ class TubeStatusRoutesTest {
                         org.apache.pekko.cluster.typed.Cluster.get(testKit.system())
                                 .selfMember().address()));
 
-        // Create stub client with sample data
-        stubClient = new StubTflClient(createSampleStatus());
+        // Create stub gateway with sample data
+        gateway = testKit.spawn(
+                StubTflGateway.create(TubeStatusRoutesTest::createSampleStatus),
+                "test-gateway");
 
         // Create replicator with fast refresh
         replicator = testKit.spawn(
                 TubeStatusReplicator.create(
-                        stubClient,
+                        gateway,
                         "test-node",
                         Duration.ofMillis(100),
                         Duration.ofSeconds(30)),
@@ -96,8 +101,7 @@ class TubeStatusRoutesTest {
         TubeStatusRoutes routes = new TubeStatusRoutes(
                 testKit.system(),
                 replicator,
-                stubClient,
-                () -> CircuitBreaker.State.CLOSED);
+                gateway);
 
         http = Http.get(testKit.system());
         materializer = Materializer.createMaterializer(testKit.system());
@@ -222,7 +226,7 @@ class TubeStatusRoutesTest {
     @Test
     void getAllStatus_withMaxAgeMsParam_attemptsRefreshIfStale() throws Exception {
         // Request with maxAgeMs=0 - cache is always "too stale", triggers TfL fetch
-        // Our stub TfL client returns fresh data, so this should succeed
+        // Our stub TfL gateway returns fresh data, so this should succeed
         HttpResponse response = get("/api/v1/tube/status?maxAgeMs=0");
         assertThat(response.status().intValue()).isEqualTo(200);
 
@@ -322,46 +326,60 @@ class TubeStatusRoutesTest {
     }
 
     /**
-     * Stub TflClient for route testing.
+     * Stub TflGateway actor for route testing.
      */
-    static class StubTflClient implements TflClient {
-        private final TubeStatus stubStatus;
+    static class StubTflGateway extends AbstractBehavior<TflGateway.Command> {
+        private final Supplier<TubeStatus> statusSupplier;
 
-        StubTflClient(TubeStatus stubStatus) {
-            this.stubStatus = stubStatus;
+        static Behavior<TflGateway.Command> create(Supplier<TubeStatus> statusSupplier) {
+            return Behaviors.setup(ctx -> new StubTflGateway(ctx, statusSupplier));
+        }
+
+        private StubTflGateway(ActorContext<TflGateway.Command> context,
+                               Supplier<TubeStatus> statusSupplier) {
+            super(context);
+            this.statusSupplier = statusSupplier;
         }
 
         @Override
-        public CompletionStage<TubeStatus> fetchAllLinesAsync() {
-            return CompletableFuture.completedFuture(new TubeStatus(
-                    stubStatus.lines(),
+        public Receive<TflGateway.Command> createReceive() {
+            return newReceiveBuilder()
+                    .onMessage(TflGateway.FetchAllLines.class, this::onFetchAllLines)
+                    .onMessage(TflGateway.FetchLineWithDateRange.class, this::onFetchLineWithDateRange)
+                    .onMessage(TflGateway.GetCircuitState.class, this::onGetCircuitState)
+                    .build();
+        }
+
+        private Behavior<TflGateway.Command> onFetchAllLines(TflGateway.FetchAllLines msg) {
+            TubeStatus status = statusSupplier.get();
+            // Return fresh status with current timestamp
+            TubeStatus fresh = new TubeStatus(
+                    status.lines(),
                     Instant.now(),
-                    stubStatus.queriedBy()
-            ));
+                    status.queriedBy()
+            );
+            msg.replyTo().tell(new TflGateway.FetchResponse(fresh, null));
+            return this;
         }
 
-        @Override
-        public CompletionStage<TubeStatus> fetchLineStatusAsync(String lineId, LocalDate from, LocalDate to) {
-            var filtered = stubStatus.lines().stream()
-                    .filter(line -> line.id().equalsIgnoreCase(lineId))
+        private Behavior<TflGateway.Command> onFetchLineWithDateRange(TflGateway.FetchLineWithDateRange msg) {
+            TubeStatus status = statusSupplier.get();
+            var filtered = status.lines().stream()
+                    .filter(line -> line.id().equalsIgnoreCase(msg.lineId()))
                     .toList();
             if (filtered.isEmpty()) {
-                return CompletableFuture.completedFuture(new TubeStatus(
-                        List.of(),
-                        Instant.now(),
-                        stubStatus.queriedBy()
-                ));
+                msg.replyTo().tell(new TflGateway.FetchResponse(
+                        new TubeStatus(List.of(), Instant.now(), status.queriedBy()), null));
+            } else {
+                msg.replyTo().tell(new TflGateway.FetchResponse(
+                        new TubeStatus(filtered, Instant.now(), status.queriedBy()), null));
             }
-            return CompletableFuture.completedFuture(new TubeStatus(
-                    filtered,
-                    Instant.now(),
-                    stubStatus.queriedBy()
-            ));
+            return this;
         }
 
-        @Override
-        public CircuitBreaker.State getCircuitState() {
-            return CircuitBreaker.State.CLOSED;
+        private Behavior<TflGateway.Command> onGetCircuitState(TflGateway.GetCircuitState msg) {
+            msg.replyTo().tell(new TflGateway.CircuitStateResponse(CircuitBreaker.State.CLOSED));
+            return this;
         }
     }
 }

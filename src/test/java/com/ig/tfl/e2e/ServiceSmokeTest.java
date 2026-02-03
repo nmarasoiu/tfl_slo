@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ig.tfl.api.TubeStatusRoutes;
 import com.ig.tfl.client.TflApiClient;
+import com.ig.tfl.client.TflGateway;
 import com.ig.tfl.crdt.TubeStatusReplicator;
 import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
@@ -37,7 +38,7 @@ import static org.awaitility.Awaitility.await;
 class ServiceSmokeTest {
 
     private ActorTestKit testKit;
-    private TflApiClient tflClient;
+    private ActorRef<TflGateway.Command> tflGateway;
     private ActorRef<TubeStatusReplicator.Command> replicator;
     private ServerBinding serverBinding;
     private String baseUrl;
@@ -80,12 +81,17 @@ class ServiceSmokeTest {
                                 .selfMember().address()));
 
         // Create REAL TfL API client (not mocked!)
-        tflClient = new TflApiClient(testKit.system(), "e2e-test-node");
+        TflApiClient tflClient = new TflApiClient(testKit.system(), "e2e-test-node");
+
+        // Create TflGateway actor wrapping the real client
+        tflGateway = testKit.spawn(
+                TflGateway.create(tflClient),
+                "e2e-tfl-gateway");
 
         // Create replicator with reasonable refresh interval
         replicator = testKit.spawn(
                 TubeStatusReplicator.create(
-                        tflClient,
+                        tflGateway,
                         "e2e-test-node",
                         Duration.ofSeconds(30),  // refresh interval
                         Duration.ofSeconds(5)),  // recent enough threshold
@@ -110,8 +116,7 @@ class ServiceSmokeTest {
         TubeStatusRoutes routes = new TubeStatusRoutes(
                 testKit.system(),
                 replicator,
-                tflClient,
-                tflClient::getCircuitState);
+                tflGateway);
 
         http = Http.get(testKit.system());
         materializer = Materializer.createMaterializer(testKit.system());

@@ -2,13 +2,12 @@ package com.ig.tfl.api;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
-import com.ig.tfl.client.TflClient;
+import com.ig.tfl.client.TflGateway;
 import com.ig.tfl.crdt.TubeStatusReplicator;
 import com.ig.tfl.crdt.TubeStatusReplicator.GetStatus;
+import com.ig.tfl.crdt.TubeStatusReplicator.GetStatusWithFreshness;
 import com.ig.tfl.crdt.TubeStatusReplicator.StatusResponse;
-import com.ig.tfl.crdt.TubeStatusReplicator.TriggerBackgroundRefresh;
 import com.ig.tfl.model.TubeStatus;
-import com.ig.tfl.resilience.CircuitBreaker;
 import com.ig.tfl.resilience.RateLimiter;
 import org.apache.pekko.actor.typed.ActorRef;
 import org.apache.pekko.actor.typed.ActorSystem;
@@ -23,7 +22,6 @@ import org.apache.pekko.http.javadsl.server.RejectionHandler;
 import org.apache.pekko.http.javadsl.server.Route;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import scala.util.Try;
 
 import java.time.Duration;
 import java.time.LocalDate;
@@ -31,39 +29,32 @@ import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.function.Supplier;
 
 /**
  * HTTP routes for tube status API.
  *
- * All queries go through CRDT for consistent caching.
+ * Thin layer: delegates caching decisions to TubeStatusReplicator,
+ * date-range queries to TflGateway.
  */
 public class TubeStatusRoutes extends AllDirectives {
     private static final Logger log = LoggerFactory.getLogger(TubeStatusRoutes.class);
 
     private final ActorSystem<?> system;
     private final ActorRef<TubeStatusReplicator.Command> replicator;
-    private final TflClient tflClient;
+    private final ActorRef<TflGateway.Command> tflGateway;
     private final RateLimiter rateLimiter;
     private final ObjectMapper objectMapper;
-    private final Supplier<CircuitBreaker.State> circuitStateSupplier;
     private final Duration askTimeout = Duration.ofSeconds(5);
-
-    // Soft threshold: if data older than this, trigger background refresh even if fresh enough to return
-    // This keeps the cache warm proactively
-    private static final long BACKGROUND_REFRESH_THRESHOLD_MS = 5_000;  // 5 seconds
 
     public TubeStatusRoutes(
             ActorSystem<?> system,
             ActorRef<TubeStatusReplicator.Command> replicator,
-            TflClient tflClient,
-            Supplier<CircuitBreaker.State> circuitStateSupplier) {
+            ActorRef<TflGateway.Command> tflGateway) {
         this.system = system;
         this.replicator = replicator;
-        this.tflClient = tflClient;
-        this.circuitStateSupplier = circuitStateSupplier;
+        this.tflGateway = tflGateway;
         this.rateLimiter = RateLimiter.perMinute(100);
         this.objectMapper = new ObjectMapper()
                 .registerModule(new JavaTimeModule());
@@ -93,7 +84,7 @@ public class TubeStatusRoutes extends AllDirectives {
         return pathPrefix("v1", () ->
                 pathPrefix("tube", () ->
                         concat(
-                                // GET /api/v1/tube/status?maxAgeMs=60000 - all lines with freshness requirement
+                                // GET /api/v1/tube/status?maxAgeMs=60000
                                 path("status", () ->
                                         get(() -> parameterOptional("maxAgeMs", maxAgeStr -> {
                                             Optional<Long> maxAgeMs = maxAgeStr.map(s -> {
@@ -106,14 +97,13 @@ public class TubeStatusRoutes extends AllDirectives {
                                             return getAllStatus(maxAgeMs.orElse(null));
                                         }))
                                 ),
-                                // GET /api/v1/tube/disruptions - filter from CRDT
+                                // GET /api/v1/tube/disruptions
                                 path("disruptions", () ->
                                         get(this::getDisruptions)
                                 ),
-                                // GET /api/v1/tube/{lineId}/status - single line (from CRDT cache)
+                                // GET /api/v1/tube/{lineId}/status
                                 pathPrefix(PathMatchers.segment(), lineId ->
                                         concat(
-                                                // GET /api/v1/tube/{lineId}/status
                                                 path("status", () ->
                                                         get(() -> getLineStatus(lineId))
                                                 ),
@@ -137,106 +127,87 @@ public class TubeStatusRoutes extends AllDirectives {
                                 get(() -> complete(StatusCodes.OK, "OK"))
                         ),
                         path("ready", () ->
-                                get(() -> {
-                                    // Ready = we have data to serve (even if stale)
-                                    // Circuit state is informational, not a readiness gate
-                                    CompletionStage<StatusResponse> future = AskPattern.ask(
-                                            replicator,
-                                            GetStatus::new,
-                                            askTimeout,
-                                            system.scheduler());
-
-                                    return onSuccess(future, response -> {
-                                        var circuitState = circuitStateSupplier.get();
-                                        boolean hasData = response.status() != null;
-
-                                        if (!hasData) {
-                                            // Cold start - no data yet
-                                            return complete(StatusCodes.SERVICE_UNAVAILABLE,
-                                                    Map.of(
-                                                            "status", "warming_up",
-                                                            "reason", "No cached data yet",
-                                                            "circuit", circuitState.name()
-                                                    ),
-                                                    Jackson.marshaller(objectMapper));
-                                        }
-
-                                        // Ready - we have data (stale or fresh, doesn't matter)
-                                        return complete(StatusCodes.OK,
-                                                Map.of(
-                                                        "status", "ready",
-                                                        "circuit", circuitState.name(),
-                                                        "dataAgeMs", response.status().ageMs()
-                                                ),
-                                                Jackson.marshaller(objectMapper));
-                                    });
-                                })
+                                get(this::readinessCheck)
                         )
                 )
         );
     }
 
-    private Route getAllStatus(Long maxAgeMs) {
-        CompletionStage<StatusResponse> cacheFuture = AskPattern.ask(
+    private Route readinessCheck() {
+        // Ask replicator for status and gateway for circuit state in parallel
+        CompletionStage<StatusResponse> statusFuture = AskPattern.ask(
                 replicator,
                 GetStatus::new,
                 askTimeout,
                 system.scheduler());
 
-        return onSuccess(cacheFuture, cacheResponse -> {
-            TubeStatus cached = cacheResponse.status();
+        CompletionStage<TflGateway.CircuitStateResponse> circuitFuture = AskPattern.ask(
+                tflGateway,
+                TflGateway.GetCircuitState::new,
+                askTimeout,
+                system.scheduler());
 
-            // No data at all
-            if (cached == null) {
+        return onSuccess(statusFuture.thenCombine(circuitFuture, (status, circuit) ->
+                Map.of("status", status, "circuit", circuit)
+        ), combined -> {
+            @SuppressWarnings("unchecked")
+            var statusResp = (StatusResponse) combined.get("status");
+            @SuppressWarnings("unchecked")
+            var circuitResp = (TflGateway.CircuitStateResponse) combined.get("circuit");
+
+            boolean hasData = statusResp.status() != null;
+
+            if (!hasData) {
+                return complete(StatusCodes.SERVICE_UNAVAILABLE,
+                        Map.of(
+                                "status", "warming_up",
+                                "reason", "No cached data yet",
+                                "circuit", circuitResp.state().name()
+                        ),
+                        Jackson.marshaller(objectMapper));
+            }
+
+            return complete(StatusCodes.OK,
+                    Map.of(
+                            "status", "ready",
+                            "circuit", circuitResp.state().name(),
+                            "dataAgeMs", statusResp.status().ageMs()
+                    ),
+                    Jackson.marshaller(objectMapper));
+        });
+    }
+
+    private Route getAllStatus(Long maxAgeMs) {
+        // Delegate freshness decision to Replicator
+        CompletionStage<StatusResponse> future = AskPattern.ask(
+                replicator,
+                ref -> new GetStatusWithFreshness(maxAgeMs, ref),
+                askTimeout,
+                system.scheduler());
+
+        return onSuccess(future, response -> {
+            TubeStatus status = response.status();
+
+            if (status == null) {
                 return complete(StatusCodes.SERVICE_UNAVAILABLE,
                         Map.of("error", "No data available"),
                         Jackson.marshaller(objectMapper));
             }
 
-            // No freshness requirement or cache is fresh enough
-            if (maxAgeMs == null || cached.ageMs() <= maxAgeMs) {
-                // Check soft threshold: trigger background refresh if getting stale
-                if (cached.ageMs() > BACKGROUND_REFRESH_THRESHOLD_MS) {
-                    log.debug("Data is {}ms old (> {}ms soft threshold) - triggering background refresh",
-                            cached.ageMs(), BACKGROUND_REFRESH_THRESHOLD_MS);
-                    replicator.tell(new TriggerBackgroundRefresh());
-                }
-                return complete(StatusCodes.OK,
-                        toApiResponse(cached),
-                        Jackson.marshaller(objectMapper));
+            Route result = complete(StatusCodes.OK,
+                    toApiResponse(status),
+                    Jackson.marshaller(objectMapper));
+
+            // Add staleness headers if data is older than requested
+            if (response.isStale()) {
+                return respondWithHeader(RawHeader.create("X-Data-Stale", "true"), () ->
+                        respondWithHeader(RawHeader.create("X-Requested-Max-Age-Ms",
+                                String.valueOf(response.requestedMaxAgeMs())), () ->
+                                respondWithHeader(RawHeader.create("X-Actual-Age-Ms",
+                                        String.valueOf(status.ageMs())), () -> result)));
             }
 
-            // Cache too stale - try to fetch fresh from TfL
-            log.info("Cache is {}ms old, client wants max {}ms - attempting TfL fetch",
-                    cached.ageMs(), maxAgeMs);
-
-            CompletionStage<TubeStatus> tflFuture = tflClient.fetchAllLinesAsync();
-
-            return onComplete(tflFuture, tryResult -> {
-                if (tryResult.isSuccess() && tryResult.get() != null) {
-                    // Got fresh data from TfL
-                    TubeStatus fresh = tryResult.get();
-                    return complete(StatusCodes.OK,
-                            toApiResponse(fresh),
-                            Jackson.marshaller(objectMapper));
-                } else {
-                    // TfL failed - return stale with warning header
-                    log.warn("TfL fetch failed, returning stale data: {}",
-                            tryResult.isFailure() ? tryResult.failed().get().getMessage() : "null response");
-                    return respondWithHeader(
-                            RawHeader.create("X-Data-Stale", "true"),
-                            () -> respondWithHeader(
-                                    RawHeader.create("X-Requested-Max-Age-Ms", String.valueOf(maxAgeMs)),
-                                    () -> respondWithHeader(
-                                            RawHeader.create("X-Actual-Age-Ms", String.valueOf(cached.ageMs())),
-                                            () -> complete(StatusCodes.OK,
-                                                    toApiResponse(cached),
-                                                    Jackson.marshaller(objectMapper))
-                                    )
-                            )
-                    );
-                }
-            });
+            return result;
         });
     }
 
@@ -253,7 +224,6 @@ public class TubeStatusRoutes extends AllDirectives {
                         Map.of("error", "No data available"),
                         Jackson.marshaller(objectMapper));
             }
-            // Filter to only lines with unplanned disruptions
             var disrupted = response.status().lines().stream()
                     .filter(line -> line.disruptions() != null &&
                             line.disruptions().stream().anyMatch(d -> !d.isPlanned()))
@@ -280,7 +250,6 @@ public class TubeStatusRoutes extends AllDirectives {
                         Map.of("error", "No data available"),
                         Jackson.marshaller(objectMapper));
             }
-            // Filter to the requested line
             var lineStatus = response.status().lines().stream()
                     .filter(line -> line.id().equalsIgnoreCase(lineId))
                     .findFirst();
@@ -302,7 +271,6 @@ public class TubeStatusRoutes extends AllDirectives {
     }
 
     private Route getLineStatusWithDateRange(String lineId, String fromStr, String toStr) {
-        // Parse dates
         LocalDate from, to;
         try {
             from = LocalDate.parse(fromStr, DateTimeFormatter.ISO_LOCAL_DATE);
@@ -319,17 +287,28 @@ public class TubeStatusRoutes extends AllDirectives {
                     Jackson.marshaller(objectMapper));
         }
 
-        // Date range queries go direct to TfL (can't cache future data)
-        CompletionStage<TubeStatus> future = tflClient.fetchLineStatusAsync(lineId, from, to);
+        // Date range queries bypass cache - ask TflGateway directly
+        CompletionStage<TflGateway.FetchResponse> future = AskPattern.ask(
+                tflGateway,
+                ref -> new TflGateway.FetchLineWithDateRange(lineId, from, to, ref),
+                askTimeout,
+                system.scheduler());
 
-        return onSuccess(future, status -> {
-            if (status == null || status.lines().isEmpty()) {
+        return onSuccess(future, response -> {
+            if (response.error() != null) {
+                log.warn("TfL fetch failed for date range query: {}", response.error().getMessage());
+                return complete(StatusCodes.SERVICE_UNAVAILABLE,
+                        Map.of("error", "Failed to fetch from TfL"),
+                        Jackson.marshaller(objectMapper));
+            }
+
+            if (response.status() == null || response.status().lines().isEmpty()) {
                 return complete(StatusCodes.NOT_FOUND,
                         Map.of("error", "No status found for line: " + lineId),
                         Jackson.marshaller(objectMapper));
             }
             return complete(StatusCodes.OK,
-                    toApiResponse(status),
+                    toApiResponse(response.status()),
                     Jackson.marshaller(objectMapper));
         });
     }
