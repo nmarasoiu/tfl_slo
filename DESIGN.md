@@ -331,6 +331,18 @@ Your SLO cannot exceed TfL's reliability (~99.5%). We target 99.9% because cachi
 | Historical estimation | Stretch goal |
 | TLS between nodes | Assume trusted network for exercise |
 | Persistent storage | Over-engineering for cache (see section 1) |
+| Date range caching | Complexity vs benefit (see [detailed analysis](docs/DATE_RANGE_CACHING.md)) |
+
+### Why Only Cache Live Status?
+
+**Live status** has constant memory footprint: 11 tube lines × small payload, single LWW-Register, always overwritten. No eviction needed.
+
+**Date ranges** have unbounded key space: every `(line, from, to)` tuple = separate entry. Would require:
+- Eviction policy (local: Caffeine W-TinyLFU, or distributed: Redis/Hazelcast)
+- Memory bounds and monitoring
+- Decision on local vs CRDT vs external cache
+
+Options exist (local Caffeine, LWWMap CRDT, Redis, hybrid) but date range traffic is low, making the complexity unjustified for now. See [docs/DATE_RANGE_CACHING.md](docs/DATE_RANGE_CACHING.md) for full analysis.
 
 **Note:** Prometheus metrics (`/metrics` endpoint) and OpenTelemetry tracing are implemented.
 
