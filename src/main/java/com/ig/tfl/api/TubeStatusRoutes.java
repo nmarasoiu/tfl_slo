@@ -1,6 +1,7 @@
 package com.ig.tfl.api;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.ig.tfl.client.TflGateway;
 import com.ig.tfl.crdt.TubeStatusReplicator;
@@ -25,11 +26,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.CompletionStage;
 import java.util.function.Supplier;
 
@@ -50,6 +51,11 @@ public class TubeStatusRoutes extends AllDirectives {
     private final Duration askTimeout;
     private final Metrics metrics;
 
+    // Freshness floor: protects against unreasonable freshness demands
+    // that could exhaust TfL quota or trigger circuit breaker
+    private final long minimumFreshnessMs;
+    private final long defaultFreshnessMs;
+
     public TubeStatusRoutes(
             ActorSystem<?> system,
             ActorRef<TubeStatusReplicator.Command> replicator,
@@ -57,9 +63,12 @@ public class TubeStatusRoutes extends AllDirectives {
             Metrics metrics) {
         this(system, replicator, tflGateway, metrics,
                 system.settings().config().getInt("tfl.rate-limit.requests-per-minute"),
-                system.settings().config().getDuration("tfl.http.ask-timeout"));
+                system.settings().config().getDuration("tfl.http.ask-timeout"),
+                system.settings().config().getLong("tfl.refresh.minimum-freshness-ms"),
+                system.settings().config().getLong("tfl.refresh.default-freshness-ms"));
     }
 
+    /** Constructor for testing with default freshness settings. */
     public TubeStatusRoutes(
             ActorSystem<?> system,
             ActorRef<TubeStatusReplicator.Command> replicator,
@@ -67,14 +76,30 @@ public class TubeStatusRoutes extends AllDirectives {
             Metrics metrics,
             int requestsPerMinute,
             Duration askTimeout) {
+        this(system, replicator, tflGateway, metrics, requestsPerMinute, askTimeout, 5000L, 60000L);
+    }
+
+    /** Constructor with all parameters including freshness configuration. */
+    public TubeStatusRoutes(
+            ActorSystem<?> system,
+            ActorRef<TubeStatusReplicator.Command> replicator,
+            ActorRef<TflGateway.Command> tflGateway,
+            Metrics metrics,
+            int requestsPerMinute,
+            Duration askTimeout,
+            long minimumFreshnessMs,
+            long defaultFreshnessMs) {
         this.system = system;
         this.replicator = replicator;
         this.tflGateway = tflGateway;
         this.metrics = metrics;
         this.rateLimiter = RateLimiter.perMinute(requestsPerMinute);
         this.askTimeout = askTimeout;
+        this.minimumFreshnessMs = minimumFreshnessMs;
+        this.defaultFreshnessMs = defaultFreshnessMs;
         this.objectMapper = new ObjectMapper()
-                .registerModule(new JavaTimeModule());
+                .registerModule(new JavaTimeModule())
+                .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
     }
 
     /** Defines all HTTP routes for the tube status API. */
@@ -129,14 +154,14 @@ public class TubeStatusRoutes extends AllDirectives {
                                 // GET /api/v1/tube/status?maxAgeMs=60000
                                 path("status", () ->
                                         get(() -> parameterOptional("maxAgeMs", maxAgeStr -> {
-                                            Optional<Long> maxAgeMs = maxAgeStr.map(s -> {
+                                            Long requestedMaxAgeMs = maxAgeStr.map(s -> {
                                                 try {
                                                     return Long.parseLong(s);
                                                 } catch (NumberFormatException e) {
                                                     return null;
                                                 }
-                                            });
-                                            return getAllStatus(maxAgeMs.orElse(null));
+                                            }).orElse(null);
+                                            return getAllStatusWithFreshnessFloor(requestedMaxAgeMs);
                                         }))
                                 ),
                                 // GET /api/v1/tube/disruptions
@@ -217,6 +242,45 @@ public class TubeStatusRoutes extends AllDirectives {
                     ),
                     Jackson.marshaller(objectMapper));
         });
+    }
+
+    /**
+     * Apply freshness floor and default, then delegate to getAllStatus.
+     *
+     * Domain-aware defense: tube status doesn't change faster than every few seconds,
+     * so requests for sub-second freshness are either:
+     * - Misunderstanding the domain (educate via headers)
+     * - Potential abuse (one client exhausting TfL quota for everyone)
+     *
+     * We transparently upgrade to floor and tell the client what we did.
+     */
+    private Route getAllStatusWithFreshnessFloor(Long requestedMaxAgeMs) {
+        // Apply default if not specified
+        Long effectiveMaxAgeMs = requestedMaxAgeMs != null ? requestedMaxAgeMs : defaultFreshnessMs;
+
+        // Check if floor needs to be applied
+        boolean floorApplied = effectiveMaxAgeMs < minimumFreshnessMs;
+        Long originalRequest = effectiveMaxAgeMs;
+
+        if (floorApplied) {
+            log.debug("Freshness floor applied: requested {}ms, using floor {}ms",
+                    originalRequest, minimumFreshnessMs);
+            effectiveMaxAgeMs = minimumFreshnessMs;
+        }
+
+        // Delegate to actual status fetch
+        Route innerRoute = getAllStatus(effectiveMaxAgeMs);
+
+        // Add transparency headers if floor was applied
+        if (floorApplied) {
+            return respondWithHeader(RawHeader.create("X-Freshness-Floor-Applied", "true"), () ->
+                    respondWithHeader(RawHeader.create("X-Freshness-Requested-Ms",
+                            String.valueOf(originalRequest)), () ->
+                            respondWithHeader(RawHeader.create("X-Freshness-Floor-Ms",
+                                    String.valueOf(minimumFreshnessMs)), () -> innerRoute)));
+        }
+
+        return innerRoute;
     }
 
     private Route getAllStatus(Long maxAgeMs) {
@@ -382,9 +446,8 @@ public class TubeStatusRoutes extends AllDirectives {
         return new ApiResponse(
                 status.lines(),
                 new ApiResponse.Meta(
-                        status.queriedAt(),
-                        status.queriedBy(),
-                        status.ageMs()
+                        status.queriedAt(),      // dataAsOfUtc
+                        Instant.now()            // respondedAtUtc
                 )
         );
     }
@@ -412,10 +475,14 @@ public class TubeStatusRoutes extends AllDirectives {
             java.util.List<TubeStatus.LineStatus> lines,
             Meta meta
     ) {
+        /**
+         * Response metadata with explicit timestamps.
+         * All times are UTC ISO-8601 format (e.g., "2024-01-15T10:30:00.123Z").
+         * Client can compute freshness as: respondedAtUtc - dataAsOfUtc
+         */
         public record Meta(
-                java.time.Instant queriedAt,
-                String queriedBy,
-                long ageMs
+                java.time.Instant dataAsOfUtc,      // When TfL was queried for this data
+                java.time.Instant respondedAtUtc    // When this response was generated
         ) {}
     }
 }

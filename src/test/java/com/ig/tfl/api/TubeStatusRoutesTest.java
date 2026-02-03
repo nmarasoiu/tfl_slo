@@ -227,15 +227,36 @@ class TubeStatusRoutesTest {
     }
 
     @Test
-    void getAllStatus_withMaxAgeMsParam_attemptsRefreshIfStale() throws Exception {
-        // Request with maxAgeMs=0 - cache is always "too stale", triggers TfL fetch
-        // Our stub TfL gateway returns fresh data, so this should succeed
+    void getAllStatus_withMaxAgeMsParam_appliesFreshnessFloor() throws Exception {
+        // Request with maxAgeMs=0 is below the 5000ms freshness floor
+        // Server transparently upgrades to floor and adds headers
         HttpResponse response = get("/api/v1/tube/status?maxAgeMs=0");
         assertThat(response.status().intValue()).isEqualTo(200);
+
+        // Verify freshness floor headers are present
+        assertThat(response.getHeader("X-Freshness-Floor-Applied"))
+                .isPresent()
+                .hasValueSatisfying(h -> assertThat(h.value()).isEqualTo("true"));
+        assertThat(response.getHeader("X-Freshness-Requested-Ms"))
+                .isPresent()
+                .hasValueSatisfying(h -> assertThat(h.value()).isEqualTo("0"));
+        assertThat(response.getHeader("X-Freshness-Floor-Ms"))
+                .isPresent()
+                .hasValueSatisfying(h -> assertThat(h.value()).isEqualTo("5000"));
 
         String body = getBody(response);
         JsonNode json = objectMapper.readTree(body);
         assertThat(json.has("lines")).isTrue();
+    }
+
+    @Test
+    void getAllStatus_withReasonableMaxAgeMs_noFloorApplied() throws Exception {
+        // Request with maxAgeMs=10000 is above the 5000ms floor, no floor applied
+        HttpResponse response = get("/api/v1/tube/status?maxAgeMs=10000");
+        assertThat(response.status().intValue()).isEqualTo(200);
+
+        // No floor headers when request is reasonable
+        assertThat(response.getHeader("X-Freshness-Floor-Applied")).isEmpty();
     }
 
     @Test
