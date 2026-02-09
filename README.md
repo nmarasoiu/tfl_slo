@@ -167,8 +167,8 @@ src/main/java/com/ig/tfl/
 │   └── SelfCluster.java         # Cluster helper
 ├── model/
 │   └── TubeStatus.java          # Domain model
-└── resilience/
-    └── RateLimiter.java         # Token bucket (100 req/min per IP)
+└── observability/
+    └── Metrics.java             # Prometheus metrics
 ```
 
 ---

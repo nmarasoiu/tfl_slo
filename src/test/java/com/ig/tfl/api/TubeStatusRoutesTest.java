@@ -103,7 +103,6 @@ class TubeStatusRoutesTest {
                 replicator,
                 gateway,
                 new Metrics(),
-                100,  // requests per minute
                 Duration.ofSeconds(5));  // ask timeout
 
         http = Http.get(testKit.system());

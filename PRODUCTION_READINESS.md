@@ -37,7 +37,7 @@ This document covers testing strategy and what's needed to take this service to 
 |-------|-----------|----------|
 | Unit | CircuitBreaker | Real object, controllable clock |
 | Unit | RetryPolicy | Pure function |
-| Unit | RateLimiter | Real object, controllable clock |
+| Unit | RetryPolicy | Pure function |
 | Integration | TflApiClient | Real HTTP + WireMock |
 | Integration | HTTP routes | Full Pekko HTTP stack |
 | Multi-node | CRDT convergence | Pekko Multi-Node TestKit |
@@ -137,7 +137,7 @@ Gauge.builder("circuit_breaker_state", () -> circuitBreaker.getState().ordinal()
 </encoder>
 ```
 
-Key log events: circuit breaker state changes, TfL fetch success/failure, CRDT updates, rate limiting.
+Key log events: circuit breaker state changes, TfL fetch success/failure, CRDT updates.
 
 ### Distributed Tracing (OpenTelemetry)
 
@@ -227,7 +227,7 @@ pekko.management {
 
 - Line ID: whitelist valid tube line IDs
 - Date range: validate format, reasonable range
-- Already have: rate limiting per IP
+- DDoS protection delegated to infrastructure layer (e.g., Cloudflare)
 
 ---
 

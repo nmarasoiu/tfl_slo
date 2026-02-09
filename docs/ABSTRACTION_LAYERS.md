@@ -18,7 +18,7 @@ This document explains why we use specific technologies at each layer and what a
 │         (Pekko Cluster + Distributed Data + Gossip)             │
 ├─────────────────────────────────────────────────────────────────┤
 │                      Resilience Layer                            │
-│         (CircuitBreaker, Retry, RateLimiter)                    │
+│              (CircuitBreaker, Retry)                             │
 ├─────────────────────────────────────────────────────────────────┤
 │                      External APIs                               │
 │                      (TfL HTTP API)                              │
@@ -169,17 +169,16 @@ pekko.cluster {
 
 ## Layer 5: Resilience
 
-### Current State: Pekko Built-ins + Manual Rate Limiter
+### Current State: Pekko Built-ins
 
 | Pattern | Implementation | Notes |
 |---------|---------------|-------|
 | Circuit Breaker | `org.apache.pekko.pattern.CircuitBreaker` | Scheduler-integrated, telemetry hooks |
 | Retry | `org.apache.pekko.pattern.Patterns.retry()` | Built-in backoff support |
-| Rate Limiter | `RateLimiter.java` (manual) | Per-client limiting (no Pekko equivalent) |
 | Timeout | Ask timeout | Native |
 | Bulkhead | Actor isolation | Natural in actor model |
 
-Rate limiter remains manual as Pekko has no per-client equivalent.
+Rate limiting is deliberately omitted — cache-served responses have near-zero cost, so DDoS protection belongs at the infrastructure layer (e.g., Cloudflare).
 
 ---
 

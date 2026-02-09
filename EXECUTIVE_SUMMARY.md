@@ -21,7 +21,6 @@ A resilient caching service for TfL (Transport for London) tube status, demonstr
 ### Resilience Patterns (Implemented)
 - Circuit breaker (Pekko built-in)
 - Exponential backoff + jitter
-- Per-IP rate limiting (token bucket)
 - CRDT replication (LWW-Register)
 - Graceful degradation (serve stale when TfL down)
 
@@ -47,11 +46,11 @@ User Request
      ▼
 ┌─────────────────────────────────────────────────────────┐
 │                     SERVICE                              │
-│  ┌─────────────┐    ┌──────────────────────────────┐   │
-│  │ Rate Limit  │───►│ Local CRDT Cache (instant)   │   │
-│  │ (100/min)   │    │        ↕ gossip              │   │
-│  └─────────────┘    │ Peer CRDT Cache (~200ms)     │   │
-│                     └──────────────────────────────┘   │
+│  ┌──────────────────────────────────────────┐           │
+│  │ Local CRDT Cache (instant)              │           │
+│  │        ↕ gossip                         │           │
+│  │ Peer CRDT Cache (~200ms)               │           │
+│  └──────────────────────────────────────────┘           │
 │                              │                         │
 │                              │ only if stale           │
 │                              ▼                         │

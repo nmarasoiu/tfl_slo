@@ -112,12 +112,12 @@ Client Request
         │                   │          To other nodes                     │
         │                   └──────────────────────────────────────────────┘
         │
-        │ rate limit check
+        │
         ▼
-┌───────────────┐           ┌─────────────────┐
-│  RateLimiter  │           │   TflApiClient  │───► TfL API
-│ (per-client)  │           │ + CircuitBreaker│
-└───────────────┘           └─────────────────┘
+┌─────────────────┐
+│   TflApiClient  │───► TfL API
+│ + CircuitBreaker│
+└─────────────────┘
 ```
 
 ### Multi-Node CRDT Replication
@@ -246,13 +246,6 @@ Exponential backoff with jitter:
 | 429 | Yes | Rate limited, respect Retry-After |
 | 4xx (except 429) | No | Client error, won't fix itself |
 
-### Rate Limiting
-
-Token bucket per client IP:
-- 100 tokens/minute
-- Exceed → 429 with `Retry-After` header
-- `X-RateLimit-Remaining` header on each response
-
 ---
 
 ## 4. Technology Stack
@@ -271,7 +264,7 @@ Token bucket per client IP:
 
 ### Why Manual Resilience Implementation?
 
-The exercise asks us to demonstrate understanding. Circuit breaker, retry, rate limiting are straightforward to implement and show we know how they work, not just how to import Resilience4j.
+The exercise asks us to demonstrate understanding. Circuit breaker and retry are straightforward to implement and show we know how they work, not just how to import Resilience4j. Rate limiting is deliberately omitted — responses are served from cache at near-zero cost, so application-level rate limiting adds overhead without protecting an expensive resource. DDoS protection belongs at the infrastructure layer (e.g., Cloudflare).
 
 ### Actors vs Streams
 

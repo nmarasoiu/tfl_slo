@@ -10,7 +10,6 @@ import com.ig.tfl.crdt.TubeStatusReplicator.GetStatusWithFreshness;
 import com.ig.tfl.crdt.TubeStatusReplicator.StatusResponse;
 import com.ig.tfl.model.TubeStatus;
 import com.ig.tfl.observability.Metrics;
-import com.ig.tfl.resilience.RateLimiter;
 import org.apache.pekko.actor.typed.ActorRef;
 import org.apache.pekko.actor.typed.ActorSystem;
 import org.apache.pekko.actor.typed.javadsl.AskPattern;
@@ -46,7 +45,6 @@ public class TubeStatusRoutes extends AllDirectives {
     private final ActorSystem<?> system;
     private final ActorRef<TubeStatusReplicator.Command> replicator;
     private final ActorRef<TflGateway.Command> tflGateway;
-    private final RateLimiter rateLimiter;
     private final ObjectMapper objectMapper;
     private final Duration askTimeout;
     private final Metrics metrics;
@@ -62,7 +60,6 @@ public class TubeStatusRoutes extends AllDirectives {
             ActorRef<TflGateway.Command> tflGateway,
             Metrics metrics) {
         this(system, replicator, tflGateway, metrics,
-                system.settings().config().getInt("tfl.rate-limit.requests-per-minute"),
                 system.settings().config().getDuration("tfl.http.ask-timeout"),
                 system.settings().config().getLong("tfl.refresh.minimum-freshness-ms"),
                 system.settings().config().getLong("tfl.refresh.default-freshness-ms"));
@@ -74,9 +71,8 @@ public class TubeStatusRoutes extends AllDirectives {
             ActorRef<TubeStatusReplicator.Command> replicator,
             ActorRef<TflGateway.Command> tflGateway,
             Metrics metrics,
-            int requestsPerMinute,
             Duration askTimeout) {
-        this(system, replicator, tflGateway, metrics, requestsPerMinute, askTimeout, 5000L, 60000L);
+        this(system, replicator, tflGateway, metrics, askTimeout, 5000L, 60000L);
     }
 
     /** Constructor with all parameters including freshness configuration. */
@@ -85,7 +81,6 @@ public class TubeStatusRoutes extends AllDirectives {
             ActorRef<TubeStatusReplicator.Command> replicator,
             ActorRef<TflGateway.Command> tflGateway,
             Metrics metrics,
-            int requestsPerMinute,
             Duration askTimeout,
             long minimumFreshnessMs,
             long defaultFreshnessMs) {
@@ -93,7 +88,6 @@ public class TubeStatusRoutes extends AllDirectives {
         this.replicator = replicator;
         this.tflGateway = tflGateway;
         this.metrics = metrics;
-        this.rateLimiter = RateLimiter.perMinute(requestsPerMinute);
         this.askTimeout = askTimeout;
         this.minimumFreshnessMs = minimumFreshnessMs;
         this.defaultFreshnessMs = defaultFreshnessMs;
@@ -111,24 +105,17 @@ public class TubeStatusRoutes extends AllDirectives {
                                 path("metrics", () ->
                                         get(() -> complete(StatusCodes.OK, metrics.scrape()))
                                 ),
-                                // API routes with rate limiting and metrics
-                                extractClientIP(remoteAddress -> {
-                                    String clientIp = remoteAddress.getAddress()
-                                            .map(addr -> addr.getHostAddress())
-                                            .orElse("unknown");
-                                    return rateLimitCheck(clientIp, () ->
-                                            pathPrefix("api", () ->
-                                                    extractRequest(request ->
-                                                            withTimedMetrics(request.method().value(),
-                                                                    request.getUri().path(),
-                                                                    () -> concat(
-                                                                            statusRoutes(),
-                                                                            healthRoutes()
-                                                                    ))
-                                                    )
-                                            )
-                                    );
-                                })
+                                // API routes with metrics
+                                pathPrefix("api", () ->
+                                        extractRequest(request ->
+                                                withTimedMetrics(request.method().value(),
+                                                        request.getUri().path(),
+                                                        () -> concat(
+                                                                statusRoutes(),
+                                                                healthRoutes()
+                                                        ))
+                                        )
+                                )
                         )
                 )
         );
@@ -423,25 +410,6 @@ public class TubeStatusRoutes extends AllDirectives {
         });
     }
 
-    private Route rateLimitCheck(String clientIp, Supplier<Route> inner) {
-        var result = rateLimiter.tryAcquire(clientIp);
-        if (!result.allowed()) {
-            return respondWithHeader(
-                    RawHeader.create("Retry-After", String.valueOf(result.retryAfter().toSeconds())),
-                    () -> complete(StatusCodes.TOO_MANY_REQUESTS,
-                            Map.of(
-                                    "error", "Rate limit exceeded",
-                                    "retryAfterSeconds", result.retryAfter().toSeconds()
-                            ),
-                            Jackson.marshaller(objectMapper))
-            );
-        }
-        return respondWithHeader(
-                RawHeader.create("X-RateLimit-Remaining", String.valueOf(result.remainingTokens())),
-                inner
-        );
-    }
-
     private ApiResponse toApiResponse(TubeStatus status) {
         return new ApiResponse(
                 status.lines(),
@@ -454,10 +422,6 @@ public class TubeStatusRoutes extends AllDirectives {
 
     private ExceptionHandler exceptionHandler() {
         return ExceptionHandler.newBuilder()
-                .match(RateLimiter.RateLimitExceededException.class, e ->
-                        complete(StatusCodes.TOO_MANY_REQUESTS,
-                                Map.of("error", "Rate limit exceeded"),
-                                Jackson.marshaller(objectMapper)))
                 .match(Exception.class, e -> {
                     log.error("Unhandled exception", e);
                     return complete(StatusCodes.INTERNAL_SERVER_ERROR,

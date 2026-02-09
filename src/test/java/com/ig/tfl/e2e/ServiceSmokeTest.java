@@ -93,7 +93,6 @@ class ServiceSmokeTest {
                         recent-enough-threshold = 30s
                         background-refresh-threshold = 20s
                     }
-                    rate-limit.requests-per-minute = 100
                     circuit-breaker {
                         failure-threshold = 5
                         open-duration = 30s

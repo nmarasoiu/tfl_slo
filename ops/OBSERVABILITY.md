@@ -16,7 +16,6 @@ All metrics exposed at `/metrics` endpoint (Prometheus format).
 | `circuit_breaker_state{name}` | Gauge | 0=CLOSED, 1=HALF_OPEN, 2=OPEN |
 | `tfl_api_requests_total{status}` | Counter | TfL API call outcomes |
 | `cluster_members_total{status}` | Gauge | Cluster membership |
-| `rate_limit_requests_total{result}` | Counter | Rate limiting outcomes |
 
 ---
 
@@ -29,7 +28,6 @@ All metrics exposed at `/metrics` endpoint (Prometheus format).
 | `TflDataStale` | TICKET | Avg freshness > 5 min (10m) |
 | `TflCircuitBreakerOpen` | TICKET | Circuit OPEN > 5 min |
 | `TflClusterMemberDown` | TICKET | < 3 healthy nodes (5m) |
-| `TflHighRateLimitRejections` | INFO | > 1% requests rate-limited |
 
 **Methodology:** Multi-window, multi-burn-rate (Google SRE best practice).
 

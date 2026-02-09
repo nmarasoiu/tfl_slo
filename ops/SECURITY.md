@@ -50,7 +50,7 @@ TLS, network policies, WAF, and secrets management.
 
 | Protection | Implementation |
 |------------|----------------|
-| Rate limiting | `RateLimiter.java` (100 req/min per IP) |
+| DDoS protection | Infrastructure layer (e.g., Cloudflare) |
 | Input validation | Line ID checked against known values |
 | Date validation | Date range validated in routes |
 | Request timeout | Pekko HTTP request timeout |

@@ -17,13 +17,12 @@ Availability = (requests returning 2xx or 429) / (total requests) × 100%
 ```
 
 **Measurement:**
-- Counter: `http_requests_total{status=~"2..|429"}`
+- Counter: `http_requests_total{status=~"2.."}`
 - Counter: `http_requests_total`
 - Exclude: Health check endpoints (`/api/health/*`)
 
 **Why this SLI:**
 - Directly measures "can users get data?"
-- 429 (rate limited) is intentional, not an error
 - 5xx responses indicate service failure
 - Aligns with user perception of "working"
 
@@ -83,8 +82,7 @@ Freshness SLI = (responses where freshnessMs < threshold) / (total responses) ×
 **Categories:**
 - `upstream_error`: TfL API failures (5xx, timeout)
 - `circuit_open`: Circuit breaker preventing TfL calls
-- `rate_limited`: Client exceeded rate limit (429)
-- `client_error`: Bad request from client (4xx except 429)
+- `client_error`: Bad request from client (4xx)
 
 **Measurement:**
 - Counter: `errors_total{type="..."}`
@@ -247,18 +245,6 @@ severity: ticket
 **Rationale:** Circuit open for 5 min means TfL is likely down. Not our fault, but worth tracking.
 
 ---
-
-#### Informational (Dashboard Only)
-
-**Rate Limiting Active**
-```yaml
-alert: TflRateLimitingActive
-expr: sum(rate(http_requests_total{status="429"}[5m])) > 0.1
-for: 1m
-severity: info
-```
-
-**Rationale:** Clients being rate-limited. Not an incident, but worth visibility.
 
 ---
 
