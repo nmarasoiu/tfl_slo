@@ -4,58 +4,6 @@ Known issues tracked for future resolution. Ordered by severity.
 
 ---
 
-## Open — Fix Now (interviewer would flag)
-
-### TD-004: Graceful shutdown race condition
-**Severity:** Critical
-**Location:** `TflApplication.java:170-174`
-
-Shutdown hook calls `serverBinding.unbind()` then `system.terminate()` without awaiting unbind completion. In-flight requests are dropped. Also `system.terminate()` has no timeout — in K8s with a 30s grace period, a slow shutdown causes forceful kill.
-
-**Fix:** Await unbind completion with timeout, then terminate with timeout.
-
----
-
-### TD-005: Histogram buckets not aligned with SLOs
-**Severity:** Critical
-**Location:** `Metrics.java:67-72`
-
-`Timer.builder("http_request_duration_seconds").publishPercentileHistogram()` uses Micrometer defaults. The `TflLatencyCriticalBurn` alert in `SLO_DEFINITION.md` queries `le="2"` which may not exist as a bucket boundary. SLO alerting rules can't be built from current metrics.
-
-**Fix:** Add `.serviceLevelObjectives(Duration.ofMillis(100), Duration.ofMillis(500), Duration.ofSeconds(2))` to align with SLO thresholds.
-
----
-
-### TD-006: Missing response_freshness_seconds histogram
-**Severity:** Critical
-**Location:** `Metrics.java`
-
-Only a gauge (`data_freshness_seconds`) exists. The freshness SLO "99.9% of responses < 5 min old" requires a histogram to compute percentiles over time. The `TflDataStale` alert queries `response_freshness_seconds` which doesn't exist.
-
-**Fix:** Add a `DistributionSummary` for `response_freshness_seconds` with SLO buckets at 5s, 60s, 300s. Record on every response alongside the gauge.
-
----
-
-### TD-007: No JVM metrics (heap, GC, threads)
-**Severity:** High
-**Location:** `TflApplication.java`
-
-No JVM metrics exposed. Can't answer "during that p99 spike, what was heap usage?" — table stakes for Java SRE at a trading firm.
-
-**Fix:** Bind `JvmMemoryMetrics`, `JvmGcMetrics`, `JvmThreadMetrics`, `ProcessorMetrics` to the Metrics registry.
-
----
-
-### TD-008: No serialVersionUID on Serializable records
-**Severity:** High
-**Location:** `TubeStatus.java:20,49,86`
-
-`TubeStatus`, `LineStatus`, `Disruption` implement `Serializable` but have no `serialVersionUID`. These are CRDT values serialized across cluster nodes. Schema change during rolling upgrade could cause deserialization failures and cluster split.
-
-**Fix:** Add `@Serial private static final long serialVersionUID = 1L;` to each record.
-
----
-
 ## Open — Backlog
 
 ### TD-001: Metrics cardinality explosion from unnormalized paths
@@ -180,8 +128,27 @@ Catches `Exception` instead of specific types, obscuring test intent and hiding 
 
 ## Resolved
 
+### TD-008: No serialVersionUID on Serializable records
+**Resolved in:** `e2e2a50`
+
+Added `@Serial serialVersionUID = 1L` to TubeStatus, LineStatus, Disruption. Prevents deserialization failures during rolling upgrades.
+
+### TD-007: No JVM metrics
+**Resolved in:** `68406fd`
+
+Bound JvmMemoryMetrics, JvmGcMetrics, JvmThreadMetrics, ProcessorMetrics to Prometheus registry.
+
+### TD-005 + TD-006: Histogram buckets + freshness histogram
+**Resolved in:** `7810f40`
+
+Duration histogram now has SLO-aligned buckets (100ms/500ms/2s). Added `response_freshness_seconds` histogram with buckets at 5s/60s/300s.
+
+### TD-004: Graceful shutdown race condition
+**Resolved in:** `d966e8e`
+
+Shutdown hook now awaits unbind (10s) then terminate (15s). Fits K8s 30s grace period.
+
 ### TD-003: Pending freshness queue had no timeout
 **Resolved in:** `bb07d90`
-**Location:** `TubeStatusReplicator.java:55`
 
 Added `DrainStalePendingRequests` timer (10s) to prevent unbounded queue growth from dead `ActorRef`s.
