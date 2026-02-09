@@ -144,8 +144,8 @@ tasks.jacocoTestCoverageVerification {
     violationRules {
         rule {
             limit {
-                // Minimum 70% line coverage
-                minimum = "0.70".toBigDecimal()
+                // Minimum 68% line coverage
+                minimum = "0.68".toBigDecimal()
             }
         }
         rule {

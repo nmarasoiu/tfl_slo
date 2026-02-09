@@ -166,11 +166,23 @@ public final class TflApplication {
                 } else {
                     log.info("HTTP server bound to {}", serverBinding.localAddress());
 
-                    // Shutdown hook
+                    // Shutdown hook: drain connections, then terminate with timeout
                     Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-                        log.info("Shutting down...");
-                        serverBinding.unbind();
-                        system.terminate();
+                        log.info("Shutting down - unbinding HTTP server...");
+                        try {
+                            serverBinding.unbind()
+                                    .toCompletableFuture()
+                                    .get(10, java.util.concurrent.TimeUnit.SECONDS);
+                            log.info("HTTP server unbound, terminating actor system...");
+                            system.terminate();
+                            system.getWhenTerminated()
+                                    .toCompletableFuture()
+                                    .get(15, java.util.concurrent.TimeUnit.SECONDS);
+                            log.info("Actor system terminated cleanly");
+                        } catch (Exception e) {
+                            log.error("Shutdown did not complete cleanly", e);
+                            system.terminate();
+                        }
                     }));
                 }
             });
