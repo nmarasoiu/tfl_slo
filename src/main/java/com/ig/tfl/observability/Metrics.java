@@ -1,6 +1,7 @@
 package com.ig.tfl.observability;
 
 import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.DistributionSummary;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
@@ -63,20 +64,33 @@ public class Metrics {
                 .register(registry)
                 .increment();
 
-        // Timer for duration histogram
+        // Timer for duration histogram with SLO-aligned buckets
         Timer.builder("http_request_duration_seconds")
                 .tag("method", method)
                 .tag("path", normalizePath(path))
                 .publishPercentileHistogram()
+                .serviceLevelObjectives(
+                        Duration.ofMillis(100),   // p50 SLO
+                        Duration.ofMillis(500),   // p95 SLO
+                        Duration.ofSeconds(2))    // p99 SLO
                 .register(registry)
                 .record(duration);
     }
 
     /**
-     * Update the data freshness gauge.
+     * Record response freshness as both gauge (current) and histogram (distribution over time).
+     * Histogram enables SLO queries like "99.9% of responses had data < 5 min old".
      */
     public void updateDataFreshness(long ageMs) {
         dataFreshnessMs.set(ageMs);
+
+        // Histogram for freshness SLO computation (buckets at SLO boundaries)
+        DistributionSummary.builder("response_freshness_seconds")
+                .publishPercentileHistogram()
+                .serviceLevelObjectives(5, 60, 300)  // 5s, 1min, 5min SLO thresholds
+                .description("Distribution of response data freshness")
+                .register(registry)
+                .record(ageMs / 1000.0);
     }
 
     /**
