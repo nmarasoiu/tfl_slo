@@ -2,6 +2,7 @@ package com.ig.tfl.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 
+import java.io.Serial;
 import java.io.Serializable;
 import java.time.Instant;
 import java.util.List;
@@ -18,6 +19,9 @@ public record TubeStatus(
         Instant queriedAt,       // When TfL API was queried (immutable through CRDT)
         String queriedBy         // Which node queried TfL (for debugging)
 ) implements Serializable {
+
+    @Serial
+    private static final long serialVersionUID = 1L;
 
     /**
      * Age of this data in milliseconds.
@@ -47,6 +51,9 @@ public record TubeStatus(
             String statusSeverityDescription,
             List<Disruption> disruptions
     ) implements Serializable {
+
+        @Serial
+        private static final long serialVersionUID = 1L;
 
         /**
          * Parse from TfL API response format.
@@ -83,5 +90,9 @@ public record TubeStatus(
             String category,
             String description,
             boolean isPlanned
-    ) implements Serializable {}
+    ) implements Serializable {
+
+        @Serial
+        private static final long serialVersionUID = 1L;
+    }
 }
