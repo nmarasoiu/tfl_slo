@@ -37,6 +37,10 @@ public class TubeStatusReplicator extends AbstractBehavior<TubeStatusReplicator.
     private static final Key<LWWRegister<TubeStatus>> STATUS_KEY =
             LWWRegisterKey.create("tube-status");
 
+    // Pending requests are drained after this timeout to prevent unbounded queue growth.
+    // Set above the ask-timeout (5s) to give TfL fetch a chance to respond naturally.
+    private static final Duration PENDING_REQUEST_TIMEOUT = Duration.ofSeconds(10);
+
     // Configuration
     private final Duration refreshInterval;
     private final Duration recentEnoughThreshold;
@@ -44,6 +48,7 @@ public class TubeStatusReplicator extends AbstractBehavior<TubeStatusReplicator.
     private final String nodeId;
 
     // Dependencies
+    private final TimerScheduler<Command> timers;
     private final ActorRef<TflGateway.Command> tflGateway;
     private final ReplicatorMessageAdapter<Command, LWWRegister<TubeStatus>> replicatorAdapter;
     private final SelfCluster selfCluster;
@@ -104,6 +109,8 @@ public class TubeStatusReplicator extends AbstractBehavior<TubeStatusReplicator.
 
     private record TflFetchComplete(TubeStatus status, Throwable error) implements Command {}
 
+    private record DrainStalePendingRequests() implements Command {}
+
     public static Behavior<Command> create(
             ActorRef<TflGateway.Command> tflGateway,
             String nodeId,
@@ -135,6 +142,7 @@ public class TubeStatusReplicator extends AbstractBehavior<TubeStatusReplicator.
             Duration backgroundRefreshThreshold) {
         super(context);
 
+        this.timers = timers;
         this.tflGateway = tflGateway;
         this.nodeId = nodeId;
         this.refreshInterval = refreshInterval;
@@ -169,6 +177,7 @@ public class TubeStatusReplicator extends AbstractBehavior<TubeStatusReplicator.
                 .onMessage(InternalGetResponse.class, this::onInternalGetResponse)
                 .onMessage(InternalUpdateResponse.class, this::onInternalUpdateResponse)
                 .onMessage(TflFetchComplete.class, this::onTflFetchComplete)
+                .onMessage(DrainStalePendingRequests.class, this::onDrainStalePendingRequests)
                 .build();
     }
 
@@ -208,11 +217,15 @@ public class TubeStatusReplicator extends AbstractBehavior<TubeStatusReplicator.
                 currentStatus.ageMs(), msg.maxAgeMs());
 
         // Queue this request to be answered when TfL responds
+        boolean wasEmpty = pendingFreshnessRequests.isEmpty();
         pendingFreshnessRequests.add(new PendingFreshnessRequest(msg.maxAgeMs(), msg.replyTo()));
 
-        // Only fetch if this is the first pending request (avoid duplicate fetches)
-        if (pendingFreshnessRequests.size() == 1) {
+        if (wasEmpty) {
+            // First pending request: fetch from TfL and schedule a safety drain
+            // to prevent unbounded queue growth if the fetch never completes
             fetchFromTfl();
+            timers.startSingleTimer("drain-pending", new DrainStalePendingRequests(),
+                    PENDING_REQUEST_TIMEOUT);
         }
 
         return this;
@@ -311,6 +324,7 @@ public class TubeStatusReplicator extends AbstractBehavior<TubeStatusReplicator.
             PendingFreshnessRequest req = pendingFreshnessRequests.poll();
             req.replyTo().tell(new StatusResponse(currentStatus, false, req.maxAgeMs()));
         }
+        timers.cancel("drain-pending");
     }
 
     private void answerPendingRequestsWithStaleData() {
@@ -319,6 +333,16 @@ public class TubeStatusReplicator extends AbstractBehavior<TubeStatusReplicator.
             // Return stale data with isStale=true so Routes can add warning headers
             req.replyTo().tell(new StatusResponse(currentStatus, true, req.maxAgeMs()));
         }
+        timers.cancel("drain-pending");
+    }
+
+    private Behavior<Command> onDrainStalePendingRequests(DrainStalePendingRequests msg) {
+        if (!pendingFreshnessRequests.isEmpty()) {
+            log.warn("Draining {} stale pending freshness requests (TfL fetch did not complete in time)",
+                    pendingFreshnessRequests.size());
+            answerPendingRequestsWithStaleData();
+        }
+        return this;
     }
 
     private Behavior<Command> onInternalUpdateResponse(InternalUpdateResponse msg) {
